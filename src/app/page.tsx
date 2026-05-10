@@ -245,9 +245,6 @@ export default function Home() {
   const [vsScanStep, setVsScanStep] = useState('')
   const [vsScanMode] = useState<'trj'>('trj')
 
-  const [e2faToken, setE2faToken] = useState('')
-  const [e2faLoading, setE2faLoading] = useState(false)
-  const [e2faResult, setE2faResult] = useState<any>(null)
 
   interface Saved2FAAccount { id: string; secret: string; label: string; issuer: string; addedAt: string }
   const [twoFaAccounts, setTwoFaAccounts] = useState<Saved2FAAccount[]>(() => { if (typeof window === 'undefined') return []; try { const s = localStorage.getItem('trj_2fa_accounts'); return s ? JSON.parse(s) : [] } catch { return [] } })
@@ -339,7 +336,6 @@ export default function Home() {
 
   // AI chat effects removed - moved to separate project
 
-  // Server promo replaced with enable-2fa
 
   useEffect(() => { })
 
@@ -653,13 +649,13 @@ export default function Home() {
                 <div className="mt-3 text-[10px] text-emerald-400/50 bg-emerald-500/8 px-3 py-1 rounded-full border border-emerald-500/15 inline-block">34 ميزة</div>
               </div>
 
-              {/* Option 2: Enable 2FA */}
-              <div onClick={() => setLandingView('enable-2fa')} className="landing-card-cyber card-icon-bg-purple text-center group">
+              {/* Option 2: 2FA Authenticator */}
+              <div onClick={() => setLandingView('twofa')} className="landing-card-cyber card-icon-bg-purple text-center group">
                 <div className="card-icon-bg card-icon-bg-purple">
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                 </div>
-                <h2 className="text-base sm:text-lg font-black text-purple-400 mb-1">تفعيل 2FA</h2>
-                <p className="text-slate-400 text-[10px] sm:text-xs leading-relaxed hidden sm:block">تفعيل المصادقة الثنائية على حسابك</p>
+                <h2 className="text-base sm:text-lg font-black text-purple-400 mb-1">مولّد 2FA</h2>
+                <p className="text-slate-400 text-[10px] sm:text-xs leading-relaxed hidden sm:block">أدخل مفتاح 2FA واحصل على الكود المتغير</p>
                 <div className="mt-3 text-[10px] text-purple-400/50 bg-purple-500/8 px-3 py-1 rounded-full border border-purple-500/15 inline-block">حماية</div>
               </div>
 
@@ -689,112 +685,6 @@ export default function Home() {
               <p className="text-[11px] text-emerald-500/40 text-center cyber-footer font-medium">Made by <span className="text-emerald-400/60">Trojan .#1888</span></p>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* ===== ENABLE 2FA ===== */}
-      {landingView === 'enable-2fa' && (
-        <div className="min-h-screen relative z-10">
-          <header className="header-modern sticky top-0 z-50 px-4 py-3">
-            <div className="max-w-3xl mx-auto flex items-center justify-between">
-              <button onClick={() => setLandingView('landing')} className="flex items-center gap-2 text-slate-400 hover:text-purple-400 transition-colors cursor-pointer">
-                <span className="text-lg">→</span>
-                <span className="text-sm font-medium">رجوع</span>
-              </button>
-              <div className="flex items-center gap-2">
-                <span className="text-lg">🔐</span>
-                <span className="text-sm font-bold text-purple-400">تفعيل 2FA</span>
-              </div>
-              <div className="w-16"></div>
-            </div>
-          </header>
-          <main className="max-w-3xl mx-auto px-4 py-6">
-            <div className="glass-card card-hover rounded-2xl p-6 border border-purple-500/15 shadow-xl shadow-black/20">
-              <div className="flex items-center gap-3 mb-5">
-                <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center text-lg">🔐</div>
-                <div>
-                  <h2 className="text-base font-bold text-[#dbdee1]">تفعيل المصادقة الثنائية</h2>
-                  <p className="text-[11px] text-slate-500">أدخل التوكن وسيتم تفعيل 2FA تلقائياً</p>
-                </div>
-              </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs text-slate-400 mb-1.5 block">التوكن</label>
-                  <input
-                    type="password"
-                    value={e2faToken}
-                    onChange={e => setE2faToken(e.target.value)}
-                    placeholder="أدخل التوكن الخاص بالحساب"
-                    className="w-full bg-[#1e1f22] border border-[#40444b] rounded-xl px-4 py-3 text-white text-sm placeholder-[#6d6f78] focus:outline-none focus:border-purple-500 transition-all"
-                    dir="ltr"
-                  />
-                </div>
-                <div className="p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20">
-                  <p className="text-[11px] text-yellow-400/80 leading-relaxed">
-                    ⚠️ <b>تنبيه:</b> تأكد من أن الحساب ليس عليه 2FA مفعّل مسبقاً. بعد التفعيل ستحتاج للـ Secret وكودات الاسترجاع للدخول مستقبلاً.
-                  </p>
-                </div>
-                <button
-                  onClick={async () => {
-                    if (!e2faToken.trim()) return
-                    setE2faLoading(true)
-                    setE2faResult(null)
-                    try {
-                      const res = await fetch('/api/enable-2fa', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ token: e2faToken.trim() })
-                      })
-                      const data = await res.json()
-                      setE2faResult(data)
-                    } catch {
-                      setE2faResult({ success: false, error: 'فشل الاتصال بالخادم' })
-                    }
-                    setE2faLoading(false)
-                  }}
-                  disabled={e2faLoading || !e2faToken.trim()}
-                  className="w-full py-3 rounded-xl text-sm font-bold bg-purple-600 text-white hover:bg-purple-700 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {e2faLoading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
-                      جاري التفعيل...
-                    </span>
-                  ) : '🔐 تفعيل 2FA'}
-                </button>
-              </div>
-
-              {/* Result */}
-              {e2faResult && (
-                <div className={`mt-5 p-4 rounded-xl border ${e2faResult.success ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20'}`}>
-                  {e2faResult.success ? (
-                    <>
-                      <p className="text-emerald-400 font-bold text-sm mb-3">✅ تم تفعيل 2FA بنجاح!</p>
-                      <div className="space-y-3">
-                        <div>
-                          <label className="text-[10px] text-slate-400 mb-1 block">🔑 Secret Key</label>
-                          <code className="block p-3 bg-black/30 rounded-lg text-sm text-emerald-300 break-all font-mono select-all" dir="ltr">{e2faResult.secret}</code>
-                        </div>
-                        {e2faResult.backup_codes && e2faResult.backup_codes.length > 0 && (
-                          <div>
-                            <label className="text-[10px] text-slate-400 mb-1 block">📦 كودات الاسترجاع ({e2faResult.backup_codes.length})</label>
-                            <div className="grid grid-cols-2 gap-1.5">
-                              {e2faResult.backup_codes.map((code: string, i: number) => (
-                                <code key={i} className="p-2 bg-black/30 rounded-lg text-[11px] text-yellow-300 font-mono text-center select-all" dir="ltr">{code}</code>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <p className="text-[10px] text-yellow-400/70 mt-2">⚠️ احفظ الـ Secret والكودات - لن تظهر مرة أخرى!</p>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="text-red-400 font-bold text-sm">❌ {e2faResult.error}</p>
-                  )}
-                </div>
-              )}
-            </div>
-          </main>
         </div>
       )}
 
