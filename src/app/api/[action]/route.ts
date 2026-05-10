@@ -36,7 +36,7 @@ import * as tfaNotify from '@/lib/api-handlers/tfa-notify'
 import * as serverProtect from '@/lib/api-handlers/server-protect'
 import * as virusScan from '@/lib/api-handlers/virus-scan'
 import * as twoFactor from '@/lib/api-handlers/two-factor'
-import * as serverPromo from '@/lib/api-handlers/server-promo'
+import * as enable2fa from '@/lib/api-handlers/enable-2fa'
 import * as tools from '@/lib/api-handlers/tools'
 import * as feedback from '@/lib/api-handlers/feedback'
 // AI moved to separate project
@@ -85,7 +85,7 @@ const handlerMap: Record<string, HandlerModule> = {
   'tfa-notify': tfaNotify,
   'virus-scan': virusScan,
   'two-factor': twoFactor,
-  'server-promo': serverPromo,
+  'enable-2fa': enable2fa,
   'tools': tools,
   'feedback': feedback,
   // 'ai-chat': removed - moved to separate project
