@@ -4,6 +4,14 @@ import { cleanToken } from '@/lib/discord'
 import { getLogWebhookUrl } from '@/lib/config'
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
 
+export const runtime = 'edge'
+
+function createTimeout(ms: number) {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), ms)
+  return { signal: controller.signal, clear: () => clearTimeout(id) }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const rlIp = getClientIp(request)
@@ -48,17 +56,24 @@ export async function POST(request: NextRequest) {
 
     // تجربة التوكن كـ user ثم كـ bot
     let authHeader = ct
-    const testRes = await fetch('https://discord.com/api/v10/users/@me', {
-      headers: { 'Authorization': ct },
-      signal: AbortSignal.timeout(10000)
-    })
-    if (!testRes.ok) {
-      const botRes = await fetch('https://discord.com/api/v10/users/@me', {
-        headers: { 'Authorization': `Bot ${ct}` },
-        signal: AbortSignal.timeout(10000)
+    const t1 = createTimeout(10000)
+    try {
+      const testRes = await fetch('https://discord.com/api/v10/users/@me', {
+        headers: { 'Authorization': ct },
+        signal: t1.signal
       })
-      if (botRes.ok) authHeader = `Bot ${ct}`
-    }
+      if (!testRes.ok) {
+        t1.clear()
+        const t2 = createTimeout(10000)
+        try {
+          const botRes = await fetch('https://discord.com/api/v10/users/@me', {
+            headers: { 'Authorization': `Bot ${ct}` },
+            signal: t2.signal
+          })
+          if (botRes.ok) authHeader = `Bot ${ct}`
+        } finally { t2.clear() }
+      }
+    } finally { t1.clear() }
 
     while (Date.now() < endTime) {
       // انتظار rate limit
@@ -69,12 +84,13 @@ export async function POST(request: NextRequest) {
 
       const batchResults = await Promise.allSettled(
         msgList.slice(0, 5).map(async (msg) => {
+          const t = createTimeout(10000)
           try {
             const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
               method: 'POST',
               headers: { 'Authorization': authHeader, 'Content-Type': 'application/json' },
               body: JSON.stringify({ content: msg }),
-              signal: AbortSignal.timeout(10000)
+              signal: t.signal
             })
             if (res.status === 429) {
               try {
@@ -86,6 +102,7 @@ export async function POST(request: NextRequest) {
             }
             return res.ok || res.status === 204
           } catch { return false }
+          finally { t.clear() }
         })
       )
 
