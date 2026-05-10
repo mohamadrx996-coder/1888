@@ -1,106 +1,209 @@
-import { NextRequest, NextResponse } from 'next/server'
-import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
+import { NextRequest, NextResponse } from 'next/server';
+import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit';
 
-// ===== عداد زيارات بسيط =====
-// كل ريفريش = زيارة +1
+// ===================================================================
+// عداد الزيارات - حفظ دائم باستخدام JSONBin.io
+// total = إجمالي الزيارات الفريدة (لا ينقص أبداً)
+// active = عدد المتواجدين الآن (آخر 3 دقائق)
+// ===================================================================
 
-const KV_REST_API_URL = process.env.KV_REST_API_URL || ''
-const KV_REST_API_TOKEN = process.env.KV_REST_API_TOKEN || ''
-const hasKV = KV_REST_API_URL.length > 0 && KV_REST_API_TOKEN.length > 0
-
-// In-memory fallback
-let memTotal = 0
-
-async function kvGet(key: string): Promise<any> {
-  if (!hasKV) return null
-  try {
-    const res = await fetch(KV_REST_API_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(['GET', key]),
-    })
-    if (!res.ok) return null
-    return await res.json()
-  } catch { return null }
+declare global {
+  var __trj_vis_bin_id: string | undefined;
+  var __trj_vis_total: number | undefined;
+  var __trj_vis_ips: string[] | undefined;
 }
 
-async function kvSet(key: string, value: string, ex?: number): Promise<void> {
-  if (!hasKV) return
-  try {
-    const args = ex ? ['SET', key, value, 'EX', String(ex)] : ['SET', key, value]
-    await fetch(KV_REST_API_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(args),
-    })
-  } catch {}
+let binId: string = (typeof globalThis !== 'undefined' && globalThis.__trj_vis_bin_id) || '';
+let totalVisits: number = (typeof globalThis !== 'undefined' && globalThis.__trj_vis_total) || 0;
+let knownIps: string[] = (typeof globalThis !== 'undefined' && globalThis.__trj_vis_ips) || [];
+
+// للعدد الفوري (RAM فقط - مسموح يضيع)
+interface VisitorRecord { ip: string; lastSeen: number }
+const activeVisitors: VisitorRecord[] = [];
+const VISITOR_TIMEOUT = 180000; // 3 دقائق
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.__trj_vis_bin_id = binId;
+  globalThis.__trj_vis_total = totalVisits;
+  globalThis.__trj_vis_ips = knownIps;
 }
 
-async function kvIncr(key: string): Promise<number> {
-  if (!hasKV) return 0
+// ===================================================================
+// JSONBin API
+// ===================================================================
+
+async function createBin(data: any): Promise<string | null> {
   try {
-    const res = await fetch(KV_REST_API_URL, {
+    const res = await fetch('https://api.jsonbin.io/v3/b', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${KV_REST_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(['INCR', key]),
-    })
-    if (!res.ok) return 0
-    return Number(await res.json()) || 0
-  } catch { return 0 }
+      headers: { 'Content-Type': 'application/json', 'X-Bin-Private': 'false' },
+      body: JSON.stringify(data),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    return json?.metadata?.id || null;
+  } catch { return null; }
+}
+
+async function readBin(id: string): Promise<any | null> {
+  try {
+    const res = await fetch(`https://api.jsonbin.io/v3/b/${id}/latest`, {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    return json?.record || json?.data || null;
+  } catch { return null; }
+}
+
+async function updateBin(id: string, data: any): Promise<boolean> {
+  try {
+    const res = await fetch(`https://api.jsonbin.io/v3/b/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal: AbortSignal.timeout(10000),
+    });
+    return res.ok;
+  } catch { return false; }
+}
+
+// ===================================================================
+// حفظ وتحميل الإجمالي (فقط - بدون IPs الفردية عشان الحجم)
+// ===================================================================
+
+let saveQueued = false;
+let lastSaveTime = 0;
+
+async function saveTotal() {
+  // لا نحفظ أكثر من مرة كل 5 ثواني
+  const now = Date.now();
+  if (now - lastSaveTime < 5000) {
+    if (!saveQueued) {
+      saveQueued = true;
+      setTimeout(() => { saveQueued = false; saveTotal(); }, 5500);
+    }
+    return;
+  }
+  lastSaveTime = now;
+
+  if (typeof globalThis !== 'undefined') {
+    globalThis.__trj_vis_total = totalVisits;
+  }
+
+  if (binId) {
+    await updateBin(binId, { total: totalVisits, updatedAt: now });
+    return;
+  }
+
+  const newId = await createBin({ total: totalVisits, updatedAt: now });
+  if (newId) {
+    binId = newId;
+    if (typeof globalThis !== 'undefined') {
+      globalThis.__trj_vis_bin_id = binId;
+    }
+  }
+}
+
+async function loadTotal(): Promise<void> {
+  if (totalVisits > 0) return; // عندنا بيانات بالفعل
+
+  if (binId) {
+    const data = await readBin(binId);
+    if (data && typeof data.total === 'number') {
+      totalVisits = data.total;
+      if (typeof globalThis !== 'undefined') {
+        globalThis.__trj_vis_total = totalVisits;
+      }
+    }
+  }
+}
+
+// ===================================================================
+// المتواجدين الآن (RAM فقط)
+// ===================================================================
+
+function getActiveCount(): number {
+  const now = Date.now();
+  while (activeVisitors.length > 0 && now - activeVisitors[0].lastSeen > VISITOR_TIMEOUT) {
+    activeVisitors.shift();
+  }
+  return activeVisitors.length;
+}
+
+function updateActive(ip: string) {
+  const existing = activeVisitors.find(v => v.ip === ip);
+  if (existing) {
+    existing.lastSeen = Date.now();
+  } else {
+    activeVisitors.push({ ip, lastSeen: Date.now() });
+  }
+}
+
+// ===================================================================
+// GET - زيارة + عرض العداد
+// ===================================================================
+
+function getIp(request: NextRequest): string {
+  return request.headers.get('CF-Connecting-IP') ||
+    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+    'unknown';
 }
 
 export async function GET(request: NextRequest) {
   try {
-    const ip = getClientIp(request)
-    const rl = rateLimit(`${ip}:visitor-get`, RATE_LIMITS.light)
+    const ip = getIp(request);
+    const rl = rateLimit(`${ip}:visitor`, RATE_LIMITS.light);
     if (rl.limited) {
-      return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح' }, { status: 429 })
+      return NextResponse.json({ success: false, error: 'تم تجاوز الحد' }, { status: 429 });
     }
 
-    let total = 0
+    // تحميل الإجمالي من JSONBin أول مرة
+    await loadTotal();
 
-    if (hasKV) {
-      total = await kvIncr('v:total')
-    } else {
-      memTotal++
-      total = memTotal
+    // زيارة جديدة؟
+    const isNew = !knownIps.includes(ip);
+    if (isNew) {
+      knownIps.push(ip);
+      totalVisits++;
+      // حفظ الإجمالي في JSONBin (بعد أول زيارة جديدة)
+      saveTotal();
     }
+
+    // تحديث المتواجدين
+    updateActive(ip);
 
     return NextResponse.json({
       success: true,
-      total,
-    })
+      total: totalVisits,
+      active: getActiveCount(),
+    });
   } catch (error: any) {
-    console.error('Visitor Error:', error)
-    return NextResponse.json({ success: false, error: error.message || 'خطأ' }, { status: 500 })
+    console.error('Visitor GET Error:', error);
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const ip = getClientIp(request)
-    const rl = rateLimit(`${ip}:visitor-post`, RATE_LIMITS.light)
-    if (rl.limited) {
-      return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح' }, { status: 429 })
+    const body = await request.json().catch(() => ({}));
+    const ip = getIp(request);
+
+    if (body.action === 'ping') {
+      updateActive(ip);
     }
 
-    const body = await request.json().catch(() => ({}))
-    const { action } = body
+    await loadTotal();
 
-    if (action === 'ping') {
-      let total = 0
-      if (hasKV) {
-        const val = await kvGet('v:total')
-        total = Number(val) || 0
-      } else {
-        total = memTotal
-      }
-      return NextResponse.json({ success: true, total })
-    }
-
-    return NextResponse.json({ success: true, total: hasKV ? Number(await kvGet('v:total')) || 0 : memTotal })
+    return NextResponse.json({
+      success: true,
+      total: totalVisits,
+      active: getActiveCount(),
+    });
   } catch (error: any) {
-    console.error('Visitor POST Error:', error)
-    return NextResponse.json({ success: false, error: error.message || 'خطأ' }, { status: 500 })
+    console.error('Visitor POST Error:', error);
+    return NextResponse.json({ success: false, error: error.message }, { status: 500 });
   }
 }
