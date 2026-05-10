@@ -4098,8 +4098,10 @@ function FeedbackModal({ show, onClose, type, isPrime, userId, username }: { sho
 
 function VisitorCounter() {
   const [visitorTotal, setVisitorTotal] = useState(0)
+  const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
+    setMounted(true)
     const fetchCount = () => {
       fetch('/api/visitor-count').then(r => r.json()).then(d => {
         if (d.success) setVisitorTotal(d.total)
