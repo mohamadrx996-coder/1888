@@ -7,10 +7,6 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   productionBrowserSourceMaps: false,
-  experimental: {
-    optimizePackageImports: ['z-ai-web-dev-sdk'],
-  },
-
 };
 
 export default nextConfig;
