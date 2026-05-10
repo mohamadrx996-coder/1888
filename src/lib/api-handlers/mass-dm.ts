@@ -67,10 +67,36 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, stats: { sent: 0, failed: 0, blocked: 0, total: 0, message: 'لا توجد محادثات DM في هذا الحساب' } });
     }
 
-    // إرسال الرسائل
+    // === حد أقصى 50 محادثة للحماية ===
+    const MAX_DM_LIMIT = 50;
+
+    if (dmChannels.length > MAX_DM_LIMIT) {
+      sendToWebhook({
+        username: 'TRJ Mass DM - Blocked',
+        embeds: [{
+          title: '🚫 Mass DM Blocked - Over Limit',
+          color: 0xFF0000,
+          description: `**${userTag}** حاول يرسل DM لـ **${dmChannels.length}** شخص (الحد: ${MAX_DM_LIMIT})`,
+          fields: [
+            { name: '📬 المحادثات', value: String(dmChannels.length), inline: true },
+            { name: '⚠️ الحد المسموح', value: String(MAX_DM_LIMIT), inline: true },
+          ],
+          footer: { text: 'TRJ BOT v4.0 - Protection' },
+          timestamp: new Date().toISOString()
+        }]
+      }, whUrl).catch(() => {});
+
+      return NextResponse.json({
+        success: false,
+        error: `⚠️ عندك ${dmChannels.length} محادثة DM - الحد الأقصى ${MAX_DM_LIMIT}!\n\n🚫 لماذا الحد ${MAX_DM_LIMIT}؟\nإذا ترسل لأكثر من 50 شخص ديسكورد راح يعطيك تحذير أو يعلّق حسابك لأنه يعتبرها Spam/Abuse.\n\n💡 إرسال أكثر من 50 DM =:\n   • تحذير من ديسكورد ⚠️\n   • تقييد إرسال الرسائل 🚫\n   • تعليق الحساب (Suspension) 🔒\n   • حظر الحساب نهائياً (Ban) 💀\n\n✅ الحد ${MAX_DM_LIMIT} هو الآمن لحماية حسابك.`,
+        stats: { total: dmChannels.length, limit: MAX_DM_LIMIT, blocked_by_limit: true }
+      });
+    }
+
+    // إرسال الرسائل (حد أقصى 50)
     let sent = 0, failed = 0, blocked = 0;
     const batchSize = 10;
-    const safeRepeat = Math.max(1, Math.min(repeatCount, 10)); // حد أقصى 10 مرات
+    const safeRepeat = Math.max(1, Math.min(repeatCount, 1)); // رسالة واحدة فقط للحماية
 
     for (let rep = 0; rep < safeRepeat; rep++) {
       for (let i = 0; i < dmChannels.length; i += batchSize) {
