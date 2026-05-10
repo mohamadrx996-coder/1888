@@ -1,5 +1,6 @@
 
 import { NextRequest, NextResponse } from 'next/server'
+import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
 
 interface VirusResult {
   file_name: string
@@ -36,6 +37,7 @@ function binaryEngineAnalyze(content: string, fileName: string): { findings: num
   const capabilities: string[] = []
   let isBinary = false
   let binaryScore = 0
+  const suspiciousUrls: string[] = []
 
   // كشف الملفات الثنائية
   const ext = fileName.split('.').pop()?.toLowerCase() || ''
@@ -207,7 +209,6 @@ function binaryEngineAnalyze(content: string, fileName: string): { findings: num
 
     // كشف URLs في الملف الثنائي
     const urlMatches = content.match(/https?:\/\/[^\s\x00-\x1F\x80-\xFF]{5,100}/g) || []
-    const suspiciousUrls: string[] = []
     for (const url of urlMatches) {
       if (!url.includes('microsoft.com') && !url.includes('windows.com') && !url.includes('github.com') && url.length > 10) {
         suspiciousUrls.push(url.substring(0, 80))
@@ -246,9 +247,7 @@ function binaryEngineAnalyze(content: string, fileName: string): { findings: num
         analysis += `  - ${cap}\n`
       }
     }
-    if (suspiciousUrls) {
-      analysis += `\n ملاحظة: لا يمكن التأكد بنسبة 100% من سلامة ملف ثنائي بدون فحص بـ sandbox.\n`
-    }
+    analysis += `\n ملاحظة: لا يمكن التأكد بنسبة 100% من سلامة ملف ثنائي بدون فحص بـ sandbox.\n`
   }
 
   const scanTime = Math.round(performance.now() - startTime)
@@ -262,6 +261,7 @@ function binaryEngineAnalyze(content: string, fileName: string): { findings: num
       suspiciousPatterns,
       capabilities: [...new Set(capabilities)],
       binaryScore,
+      suspiciousUrls,
     }
   }
 }
@@ -489,9 +489,16 @@ function combineResults(
   const { suspiciousPatterns: patPatterns, capabilities: patCaps, ports, c2Servers, encodedStrings, networkIndicators, dangerCount, warningCount } = patternResult.data
   const binPatterns = binaryResult.data.suspiciousPatterns
   const binCaps = binaryResult.data.capabilities
+  const binUrls = binaryResult.data.suspiciousUrls || []
 
   const allPatterns = [...patPatterns, ...binPatterns]
   const allCapabilities = [...new Set([...patCaps, ...binCaps])]
+
+  // إضافة URLs المشبوهة من المحرك الثنائي
+  const allC2Servers = [...c2Servers]
+  for (const u of binUrls) {
+    if (!allC2Servers.includes(u)) allC2Servers.push(u)
+  }
 
   for (const t of heuristicResult.threats) {
     if (t.includes('eval') || t.includes('حقن')) allThreatTypes.add('Code Injection')
@@ -513,7 +520,6 @@ function combineResults(
   // حساب النتيجة النهائية
   let score: number
   if (binaryResult.is_binary) {
-    // للملفات الثنائية: وزن أكبر لمحرك الثنائي
     score = Math.round(binaryScore * 0.55 + patternScore * 0.25 + heuristicScore * 0.20)
   } else {
     score = Math.round(patternScore * 0.55 + heuristicScore * 0.45)
@@ -526,7 +532,6 @@ function combineResults(
   let recommendation = ''
 
   if (binaryResult.is_binary && score >= 25) {
-    // ملف ثنائي مشبوه
     isSuspicious = true
     if (score >= 70) {
       threatLevel = 'critical'
@@ -608,7 +613,7 @@ function combineResults(
     threat_level: threatLevel,
     threat_type: threatTypeArr,
     ports,
-    c2_servers: c2Servers,
+    c2_servers: allC2Servers,
     suspicious_patterns: allPatterns.slice(0, 30),
     encoded_strings: encodedStrings,
     network_indicators: networkIndicators,
@@ -628,6 +633,12 @@ function combineResults(
 }
 
 export async function POST(request: NextRequest) {
+  const rlIp = getClientIp(request)
+  const rl = rateLimit(`${rlIp}:virus-scan`, RATE_LIMITS.medium)
+  if (rl.limited) {
+    return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح - حاول لاحقاً' }, { status: 429 })
+  }
+
   try {
     const formData = await request.formData()
     const file = formData.get('file') as File | null
