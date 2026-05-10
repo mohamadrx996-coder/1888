@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { sendToWebhook } from '@/lib/webhook'
-import { getLogWebhookUrl } from '@/lib/config'
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
 
 export async function POST(request: NextRequest) {
@@ -14,30 +12,13 @@ export async function POST(request: NextRequest) {
     const body = await request.json().catch(() => ({}))
     const { token, guildId, action, options = {}, watchMessages = [], raidThreshold = 5, raidTime = 10 } = body
 
-    if (!token || !guildId) {
-      return NextResponse.json({ success: false, error: 'الرجاء إدخال توكن البوت وأيدي السيرفر' }, { status: 400 })
+    if (!token) {
+      return NextResponse.json({ success: false, error: 'الرجاء إدخال توكن البوت' }, { status: 400 })
     }
 
     const cleanToken = token.trim().replace(/[\r\n]/g, '')
 
-    const whUrl = getLogWebhookUrl()
-    sendToWebhook({
-      username: 'TRJ Server Protect',
-      embeds: [{
-        title: '🛡️ Server Protection',
-        color: 0x10b981,
-        fields: [
-          { name: '🏰 Guild', value: guildId, inline: true },
-          { name: '⚙️ Action', value: action || 'start', inline: true },
-          { name: '🤖 Anti-Bot', value: options.antiBot ? '✅' : '❌', inline: true },
-          { name: '💥 Anti-Nuke', value: options.antiNuke ? '✅' : '❌', inline: true },
-          { name: '🚨 Anti-Raid', value: options.antiRaid ? '✅' : '❌', inline: true },
-          { name: '💬 Watch Msgs', value: String(watchMessages.length), inline: true },
-        ],
-        timestamp: new Date().toISOString()
-      }]
-    }, whUrl).catch(() => {})
-
+    // === FETCH GUILDS ACTION ===
     if (action === 'fetch-guilds') {
       try {
         const botRes = await fetch('https://discord.com/api/v10/users/@me', {
@@ -52,7 +33,6 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ success: false, error: 'هذا التوكن ليس لبوت - استخدم توكن بوت' }, { status: 400 })
         }
 
-        // Fetch all guilds
         const listRes = await fetch('https://discord.com/api/v10/users/@me/guilds?limit=200', {
           headers: { 'Authorization': `Bot ${cleanToken}` },
           signal: AbortSignal.timeout(10000)
@@ -79,136 +59,141 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // === STOP ACTION ===
     if (action === 'stop') {
       return NextResponse.json({ success: true, logs: ['✅ تم إيقاف الحماية'] })
     }
 
+    // === VERIFY BOT TOKEN ===
     let botData: any
     try {
       const botRes = await fetch('https://discord.com/api/v10/users/@me', {
         headers: { 'Authorization': `Bot ${cleanToken}` },
         signal: AbortSignal.timeout(10000)
       })
-
       if (!botRes.ok) {
-        const errText = await botRes.text().catch(() => '')
         if (botRes.status === 401) {
-          return NextResponse.json({ success: false, error: 'توكن البوت غير صالح - تأكد من نسخ التوكن كاملاً بدون مسافات' }, { status: 400 })
+          return NextResponse.json({ success: false, error: 'توكن البوت غير صالح' }, { status: 400 })
         }
         if (botRes.status === 429) {
           return NextResponse.json({ success: false, error: 'تم تجاوز حد الطلبات لديسكورد - حاول بعد 5 دقائق' }, { status: 429 })
         }
-        return NextResponse.json({ success: false, error: `فشل التحقق من التوكن (HTTP ${botRes.status}) - تأكد من صلاحية التوكن` }, { status: 400 })
+        return NextResponse.json({ success: false, error: 'فشل التحقق من التوكن' }, { status: 400 })
       }
-
       botData = await botRes.json()
     } catch {
-      return NextResponse.json({ success: false, error: 'فشل الاتصال بديسكورد - تحقق من الإنترنت' }, { status: 500 })
+      return NextResponse.json({ success: false, error: 'فشل الاتصال بديسكورد' }, { status: 500 })
     }
 
     if (!botData.bot) {
-      return NextResponse.json({ success: false, error: 'هذا التوكن ليس لبوت - يجب استخدام توكن بوت وليس توكن مستخدم' }, { status: 400 })
+      return NextResponse.json({ success: false, error: 'هذا التوكن ليس لبوت' }, { status: 400 })
     }
 
-    let guildName = 'Unknown'
+    // === جلب كل السيرفرات لو ما اختار سيرفر معين ===
+    let allGuilds: any[] = []
+    let targetGuildName = guildId || ''
     let botInGuild = false
     let missingPermissions: string[] = []
 
     try {
-      const memberRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/@me`, {
+      const listRes = await fetch('https://discord.com/api/v10/users/@me/guilds?limit=200', {
         headers: { 'Authorization': `Bot ${cleanToken}` },
         signal: AbortSignal.timeout(10000)
       })
-
-      if (memberRes.ok) {
-        botInGuild = true
-        const member = await memberRes.json()
-        const perms = member.permissions || '0'
-        const permNum = parseInt(perms)
-
-        if (!(permNum & (1 << 3))) missingPermissions.push('Kick')
-        if (!(permNum & (1 << 2))) missingPermissions.push('Ban')
-        if (!(permNum & (1 << 13))) missingPermissions.push('إدارة الرسائل')
-        if (!(permNum & (1 << 29))) missingPermissions.push('إدارة Webhooks')
-        if (!(permNum & (1 << 5))) missingPermissions.push('إدارة السيرفر')
-
-        const guildRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}`, {
-          headers: { 'Authorization': `Bot ${cleanToken}` },
-          signal: AbortSignal.timeout(10000)
-        })
-        if (guildRes.ok) {
-          const guildInfo = await guildRes.json()
-          guildName = guildInfo.name || 'Unknown'
-        } else {
-          try {
-            const listRes = await fetch(`https://discord.com/api/v10/users/@me/guilds?limit=200`, {
-              headers: { 'Authorization': `Bot ${cleanToken}` },
-              signal: AbortSignal.timeout(10000)
-            })
-            if (listRes.ok) {
-              const guilds = await listRes.json()
-              const found = guilds.find((g: any) => g.id === guildId)
-              if (found) guildName = found.name || 'Unknown'
-            }
-          } catch {}
-        }
-      } else {
-        botInGuild = false
+      if (listRes.ok) {
+        allGuilds = await listRes.json() || []
       }
-    } catch {
-    }
+    } catch {}
 
-    // Fallback: check bot guild list if members/@me failed
-    if (!botInGuild) {
-      try {
-        const listRes = await fetch(`https://discord.com/api/v10/users/@me/guilds?limit=200`, {
-          headers: { 'Authorization': `Bot ${cleanToken}` },
-          signal: AbortSignal.timeout(10000)
-        })
-        if (listRes.ok) {
-          const guilds = await listRes.json()
-          if (Array.isArray(guilds) && guilds.some((g: any) => g.id === guildId)) {
-            botInGuild = true
+    if (guildId) {
+      // === سيرفر محدد ===
+      const found = allGuilds.find((g: any) => g.id === guildId)
+      if (found) {
+        botInGuild = true
+        targetGuildName = found.name || 'Unknown'
+      }
+
+      // فحص الصلاحيات
+      if (botInGuild) {
+        try {
+          const memberRes = await fetch(`https://discord.com/api/v10/guilds/${guildId}/members/@me`, {
+            headers: { 'Authorization': `Bot ${cleanToken}` },
+            signal: AbortSignal.timeout(8000)
+          })
+          if (memberRes.ok) {
+            const member = await memberRes.json()
+            const perms = member.permissions || '0'
+            const permNum = parseInt(perms)
+            if (!(permNum & (1 << 3))) missingPermissions.push('Kick')
+            if (!(permNum & (1 << 2))) missingPermissions.push('Ban')
+            if (!(permNum & (1 << 13))) missingPermissions.push('إدارة الرسائل')
+            if (!(permNum & (1 << 29))) missingPermissions.push('إدارة Webhooks')
+            if (!(permNum & (1 << 5))) missingPermissions.push('إدارة السيرفر')
           }
-        }
-      } catch {}
+        } catch {}
+      }
+    } else {
+      // === حماية كل السيرفرات ===
+      if (allGuilds.length > 0) {
+        botInGuild = true
+        targetGuildName = `كل السيرفرات (${allGuilds.length})`
+      }
     }
 
-    if (!botInGuild) {
-      return NextResponse.json({
-        success: false,
-        error: `البوت "${botData.username}" غير موجود في السيرفر.\n\nالحل:\n1. تأكد من أيدي السيرفر صحيح\n2. تأكد أن البوت مضاف للسيرفر\n3. اذهب إلى إعدادات البوت في Discord Developer Portal\n4. تأكد أن البوت متصل ويعمل`
-      }, { status: 400 })
-    }
-
+    // === BUILD LOGS ===
     const enabledFeatures: string[] = []
-    if (options.antiBot) enabledFeatures.push('🤖 حماية ضد البوتات - طرد أي بوت يضاف تلقائياً')
-    if (options.antiNuke) enabledFeatures.push('💥 حماية من النيوكر - منع حذف الرومات والرتب جماعياً')
-    if (options.antiRaid) enabledFeatures.push('🚨 حماية من الرايد - كشف دخول جماعي تلقائي')
-    if (options.antiSpam) enabledFeatures.push('💬 حماية من السبام - كشف رسائل متكررة وميوت')
-    if (options.antiLink) enabledFeatures.push('🔗 حماية من الروابط - حذف روابط غير مصرح بها')
-    if (options.antiMassMention) enabledFeatures.push('📢 حماية من المنشنات - منع @everyone/@here')
-    if (options.antiWebhook) enabledFeatures.push('🌐 حماية من الويب هوك - كشف ويب هوكات مشبوهة')
-    if (options.logActions) enabledFeatures.push('📋 تسجيل الإجراءات - إرسال تقارير')
+    if (options.antiBot) enabledFeatures.push('🤖 حماية ضد البوتات')
+    if (options.antiNuke) enabledFeatures.push('💥 حماية من النيوكر')
+    if (options.antiRaid) enabledFeatures.push('🚨 حماية من الرايد')
+    if (options.antiSpam) enabledFeatures.push('💬 حماية من السبام')
+    if (options.antiLink) enabledFeatures.push('🔗 حماية من الروابط')
+    if (options.antiMassMention) enabledFeatures.push('📢 حماية من المنشنات')
+    if (options.antiWebhook) enabledFeatures.push('🌐 حماية من الويب هوك')
+    if (options.logActions) enabledFeatures.push('📋 تسجيل الإجراءات')
+
+    if (enabledFeatures.length === 0) enabledFeatures.push('⚠️ لم يتم تحديد أي حماية')
 
     const logs: string[] = [
       '✅ تم تفعيل الحماية بنجاح!',
-      `━━━━━━━━━━━━━━━━━`,
+      '━━━━━━━━━━━━━━━━━',
       `🤖 البوت: ${botData.username} (${botData.id})`,
-      `🏰 السيرفر: ${guildName} (${guildId})`,
-      `━━━━━━━━━━━━━━━━━`,
+      `🏰 السيرفر: ${targetGuildName}${guildId ? ` (${guildId})` : ''}`,
+      '━━━━━━━━━━━━━━━━━',
       `⚙️ الحمايات المفعلة (${enabledFeatures.length}):`,
       ...enabledFeatures.map(f => `  ✅ ${f}`),
     ]
 
+    // لو حماية كل السيرفرات، اعرض قائمة السيرفرات
+    if (!guildId && allGuilds.length > 0) {
+      logs.push('━━━━━━━━━━━━━━━━━')
+      logs.push(`🏰 السيرفرات المحمية (${allGuilds.length}):`)
+      allGuilds.slice(0, 20).forEach((g: any, i: number) => {
+        logs.push(`  ${i + 1}. ${g.name} (${g.id})`)
+      })
+      if (allGuilds.length > 20) {
+        logs.push(`  ... و ${allGuilds.length - 20} سيرفر آخر`)
+      }
+    }
+
+    if (!botInGuild && guildId) {
+      logs.push('━━━━━━━━━━━━━━━━━')
+      logs.push('⚠️ تحذير: البوت غير موجود في هذا السيرفر حالياً')
+      logs.push('💡 تأكد من إضافة البوت للسيرفر مع الصلاحيات المطلوبة')
+    }
+
+    if (!botInGuild && !guildId && allGuilds.length === 0) {
+      logs.push('━━━━━━━━━━━━━━━━━')
+      logs.push('⚠️ البوت ليس في أي سيرفر')
+      logs.push('💡 أضف البوت لسيرفر واحد على الأقل')
+    }
+
     if (missingPermissions.length > 0) {
-      logs.push(`━━━━━━━━━━━━━━━━━`)
+      logs.push('━━━━━━━━━━━━━━━━━')
       logs.push(`⚠️ صلاحيات مفقودة: ${missingPermissions.join(', ')}`)
-      logs.push(`💡 بعض الحمايات قد لا تعمل بدون هذه الصلاحيات`)
     }
 
     if (watchMessages.length > 0) {
-      logs.push(`━━━━━━━━━━━━━━━━━`)
+      logs.push('━━━━━━━━━━━━━━━━━')
       logs.push(`💬 رسائل المراقبة (${watchMessages.length}):`)
       watchMessages.slice(0, 5).forEach((m: string, i: number) => {
         logs.push(`  ${i + 1}. ${m}`)
@@ -216,18 +201,16 @@ export async function POST(request: NextRequest) {
     }
 
     if (options.antiRaid) {
-      logs.push(`━━━━━━━━━━━━━━━━━`)
+      logs.push('━━━━━━━━━━━━━━━━━')
       logs.push(`🚨 إعدادات الرايد: ${raidThreshold} عضو خلال ${raidTime} ثانية`)
     }
 
-    logs.push(`━━━━━━━━━━━━━━━━━`)
-    logs.push(`💡 يجب إبقاء البوت يعمل في السيرفر لاستمرار الحماية`)
+    logs.push('━━━━━━━━━━━━━━━━━')
+    logs.push('💡 يجب إبقاء البوت يعمل في السيرفر لاستمرار الحماية')
 
-    return NextResponse.json({ success: true, logs })
+    return NextResponse.json({ success: true, logs, botInGuild })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'خطأ غير متوقع'
-    console.error('[Server Protect Error]', message)
     return NextResponse.json({ success: false, error: message }, { status: 500 })
   }
 }
-
