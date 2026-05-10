@@ -233,12 +233,7 @@ export default function Home() {
   const [tfaNotifyLogs, setTfaNotifyLogs] = useState<string[]>([])
   const [tfaNotifyLoading, setTfaNotifyLoading] = useState(false)
 
-  // AI Chat moved to separate project - trj-ai.pages.dev
-  const [_aiMessages] = useState<any[]>([])
-  const [_aiInput] = useState('')
-  const [_aiLoading] = useState(false)
-  const [_aiCodeLang] = useState('auto')
-  const _aiChatEndRef = useRef<HTMLDivElement>(null)
+  // AI Chat moved to separate project
 
   const [vsFile, setVsFile] = useState<File | null>(null)
   const [vsContent, setVsContent] = useState('')
@@ -248,7 +243,7 @@ export default function Home() {
   const [vsError, setVsError] = useState('')
   const [vsScanProgress, setVsScanProgress] = useState(0)
   const [vsScanStep, setVsScanStep] = useState('')
-  const [vsScanMode, setVsScanMode] = useState<'trj' | 'ai-deep'>('trj')
+  const [vsScanMode] = useState<'trj'>('trj')
 
   const [spServers, setSpServers] = useState<any[]>([])
   const [spCategories, setSpCategories] = useState<{ id: string; name: string; icon: string }[]>([])
@@ -365,7 +360,7 @@ export default function Home() {
     setSpLoading(false)
   }, [spLoading])
 
-  useEffect(() => { if (section === 'server-promo') fetchServerPromo(spCategory, spSort) }, [section, spCategory, spSort])
+  useEffect(() => { if (landingView === 'app') fetchServerPromo(spCategory, spSort) }, [landingView, spCategory, spSort])
 
   useEffect(() => { })
 
@@ -902,11 +897,6 @@ export default function Home() {
           <main className="max-w-4xl mx-auto px-4 py-6">
             <div className="glass-card card-hover rounded-2xl p-6 border border-red-500/15 shadow-xl shadow-black/20">
               <p className="text-slate-500 text-xs mb-4">ارفع ملف أو الصق كود للتحليل باستخدام محركات فحص متقدمة</p>
-              {/* Scan Mode Selection */}
-              <div className="flex gap-2 mb-3">
-                <button onClick={() => { setVsScanMode('trj'); setVsResult(null); setVsError('') }} className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${vsScanMode === 'trj' ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-white/5 text-white/40 border-white/10'}`}>🔍 فحص TRJ</button>
-                <button onClick={() => { setVsScanMode('ai-deep'); setVsResult(null); setVsError('') }} className={`flex-1 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${vsScanMode === 'ai-deep' ? 'bg-purple-500/20 text-purple-400 border-purple-500/30' : 'bg-white/5 text-white/40 border-white/10'}`}>🤖 AI متقدم</button>
-              </div>
               {/* Input Mode Selection */}
               <div className="flex gap-2 mb-4">
                 <button onClick={() => { setVsInputMode('file'); setVsResult(null); setVsError('') }} className={`flex-1 py-2 rounded-xl text-[11px] font-bold transition-all cursor-pointer border ${vsInputMode === 'file' ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25' : 'bg-white/3 text-white/35 border-white/8'}`}>📁 رفع ملف (50MB)</button>
@@ -920,22 +910,21 @@ export default function Home() {
               ) : (
                 <textarea value={vsContent} onChange={e => { setVsContent(e.target.value); setVsResult(null); setVsError('') }} placeholder="الصق الكود هنا..." rows={6} className="w-full bg-black/30 border border-red-500/20 rounded-xl px-4 py-3 text-white text-xs font-mono placeholder-white/20 focus:outline-none focus:border-red-400/40 resize-none mb-4" />
               )}
-              <ActionBtn text={vsScanMode === 'trj' ? '🔍 فحص الملف (3 محركات)' : '🤖 فحص AI متقدم'} loading={vsLoading} color={vsScanMode === 'trj' ? 'red' : 'purple'} onClick={async () => {
+              <ActionBtn text='🔍 فحص الملف (3 محركات)' loading={vsLoading} color='red' onClick={async () => {
                 if (vsInputMode === 'file' && !vsFile) { setVsError('❌ الرجاء رفع ملف'); return }
                 if (vsInputMode === 'code' && !vsContent.trim()) { setVsError('❌ الرجاء لصق كود'); return }
                 setVsLoading(true); setVsResult(null); setVsError(''); setVsScanProgress(0); setVsScanStep('جاري التحضير...')
                 try {
-                  setVsScanStep(vsScanMode === 'ai-deep' ? '🤖 تحليل AI عميق - فحص الوظائف والأقسام...' : 'TRJ Pattern Engine - فحص الأنماط...')
+                  setVsScanStep('TRJ Binary Engine - تحليل البايناري...')
                     setVsScanProgress(15)
                     await new Promise(r => setTimeout(r, 500))
-                    setVsScanStep(vsScanMode === 'ai-deep' ? '🤖 تحليل السلوك والقدرات...' : 'TRJ AI Engine - تحليل بالذكاء الاصطناعي...')
+                    setVsScanStep('TRJ Pattern Engine - فحص الأنماط...')
                     setVsScanProgress(45)
                     const formData = new FormData()
                     if (vsInputMode === 'file' && vsFile) formData.append('file', vsFile)
                     else formData.append('content', vsContent)
-                    if (vsScanMode === 'ai-deep') formData.append('deep', 'true')
                     const res = await fetch('/api/virus-scan', { method: 'POST', body: formData })
-                    setVsScanStep(vsScanMode === 'ai-deep' ? '🤖 التحقق من طبقات التشفير...' : 'TRJ Heuristic Engine - فحص استقرائي...')
+                    setVsScanStep('TRJ Heuristic Engine - فحص استقرائي...')
                     setVsScanProgress(75)
                     await new Promise(r => setTimeout(r, 400))
                     setVsScanStep('جاري تجميع النتائج...')
@@ -964,7 +953,7 @@ export default function Home() {
               )}
               {vsError && <div className="mt-4 p-3 rounded-xl bg-red-500/10 text-red-400 text-sm border border-red-500/20 text-center">{vsError}</div>}
               {/* TRJ Scan Results */}
-              {vsResult && (vsScanMode === 'trj' || vsScanMode === 'ai-deep') && (
+              {vsResult && (
                 <div className="mt-5 space-y-4 animate-fade-in">
                   {/* Overall Result with Threat Score */}
                   <div className={`p-4 rounded-xl border ${vsResult.threat_level === 'clean' ? 'bg-green-500/10 border-green-500/20' : vsResult.threat_level === 'low' ? 'bg-yellow-500/10 border-yellow-500/20' : vsResult.threat_level === 'medium' ? 'bg-orange-500/10 border-orange-500/20' : vsResult.threat_level === 'high' ? 'bg-red-500/10 border-red-500/20' : 'bg-red-600/15 border-red-600/30'}`}>
@@ -984,7 +973,7 @@ export default function Home() {
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-2xl">{vsResult.threat_level === 'clean' ? '✅' : vsResult.threat_level === 'low' ? '⚠️' : vsResult.threat_level === 'medium' ? '🔶' : vsResult.threat_level === 'high' ? '🔴' : '💀'}</span>
                           <div className={`text-sm font-black ${vsResult.threat_level === 'clean' ? 'text-green-400' : vsResult.threat_level === 'low' ? 'text-yellow-400' : vsResult.threat_level === 'medium' ? 'text-orange-400' : 'text-red-400'}`}>{vsResult.threat_level === 'clean' ? 'نظيف' : vsResult.threat_level === 'low' ? 'مشبوه قليلاً' : vsResult.threat_level === 'medium' ? 'مشبوه' : vsResult.threat_level === 'high' ? 'خطير' : 'حرج جداً'}</div>
-                          {vsScanMode === 'ai-deep' && <span className="text-[9px] text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">🤖 AI عميق</span>}
+                          {false && <span className="text-[9px] text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full">🤖 AI عميق</span>}
                         </div>
                         <div className="text-[10px] text-slate-500 mb-2">{vsResult.summary}</div>
                         <div className="text-[11px] text-slate-400 p-2 rounded-lg bg-black/20">{vsResult.recommendation}</div>
@@ -1028,7 +1017,7 @@ export default function Home() {
                           <div className="flex items-center gap-2">
                             <div className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs ${vsResult.engines.ai_engine.confidence === 'none' ? 'bg-yellow-500/20 text-yellow-400' : vsResult.engines.ai_engine.threat_assessment === 'clean' ? 'bg-green-500/20 text-green-400' : ['high', 'critical'].includes(vsResult.engines.ai_engine.threat_assessment) ? 'bg-red-500/20 text-red-400' : 'bg-yellow-500/20 text-yellow-400'}`}>{vsResult.engines.ai_engine.confidence === 'none' ? '⚠️' : vsResult.engines.ai_engine.threat_assessment === 'clean' ? '✅' : '🟡'}</div>
                             <div>
-                              <div className="text-xs font-bold text-white">{vsScanMode === 'ai-deep' ? '🤖 TRJ AI Deep Engine' : 'TRJ AI Engine'}</div>
+                              <div className="text-xs font-bold text-white">TRJ Scan Engine</div>
                               <div className="text-[9px] text-slate-500">تحليل بالذكاء الاصطناعي {vsResult.engines.ai_engine.confidence ? `(ثقة: ${vsResult.engines.ai_engine.confidence})` : ''}</div>
                             </div>
                           </div>
@@ -1674,12 +1663,11 @@ export default function Home() {
             {section === 'mass-dm' && (
               <div className="animate-fade-in"><div className="glass-card card-hover rounded-2xl p-6 border border-purple-500/15 shadow-xl shadow-black/20">
                 <div className="flex items-center gap-3 mb-1"><span className="text-2xl">📧</span><h2 className="text-xl font-black text-purple-400">DM جماعي</h2></div>
-                <p className="text-slate-500 text-sm mb-5">إرسال رسالة خاصة لكل أعضاء سيرفر - 10 بالتوازي</p>
-                <TokenInput label="🎫 التوكن" value={massDmToken} onChange={setMassDmToken} accent="purple" onHelp={() => setShowTokenGuide(true)} />
-                <TextInput label="🏰 أيدي السيرفر" value={dmGuildId} onChange={setDmGuildId} placeholder="Guild ID" accent="purple" />
-                <div className="mb-4"><label className="text-[11px] text-purple-300/70 mb-1 block">💬 رسالة DM</label><textarea value={dmMessage} onChange={e => setDmMessage(e.target.value)} placeholder="اكتب رسالتك هنا..." rows={3} className="w-full bg-black/30 border border-purple-500/30 rounded-xl px-4 py-3 text-white text-sm placeholder-purple-700/30 focus:outline-none focus:border-purple-400/50 resize-none transition-colors" /></div>
-                <div className="mb-5"><label className="text-[11px] text-purple-300/70 mb-1 block">👥 الحد الأقصى للأعضاء</label><input type="number" value={dmMaxMembers} onChange={e => setDmMaxMembers(Number(e.target.value))} className="w-full bg-black/30 border border-purple-500/30 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-purple-400/50 transition-colors" /></div>
-                <ActionBtn text="📧 بدء الإرسال الجماعي" loading={loading} color="purple" onClick={() => { if (!dmMessage) { setResult('❌ أدخل الرسالة'); return }; api('mass-dm', { token: massDmToken, guildId: dmGuildId, message: dmMessage, maxMembers: dmMaxMembers }) }} />
+                <p className="text-slate-500 text-sm mb-5">إرسال رسالة خاصة لكل محادثات DM في حسابك - حد أقصى 50 محادثة</p>
+                <TokenInput label="🎫 توكن الحساب (User Token)" value={massDmToken} onChange={setMassDmToken} accent="purple" onHelp={() => setShowTokenGuide(true)} />
+                <div className="bg-purple-500/5 rounded-xl p-3 mb-5 border border-purple-500/10"><p className="text-[11px] text-purple-400/80 leading-relaxed">⚠️ يجب استخدام توكن حساب (User Token) وليس توكن بوت!<br />📧 يرسل لكل محادثات DM الموجودة في حسابك تلقائياً<br />🛡️ الحد الأقصى 50 محادثة لحماية حسابك من التحذيرات</p></div>
+                <div className="mb-5"><label className="text-[11px] text-purple-300/70 mb-1 block">💬 رسالة DM</label><textarea value={dmMessage} onChange={e => setDmMessage(e.target.value)} placeholder="اكتب رسالتك هنا..." rows={3} className="w-full bg-black/30 border border-purple-500/30 rounded-xl px-4 py-3 text-white text-sm placeholder-purple-700/30 focus:outline-none focus:border-purple-400/50 resize-none transition-colors" /></div>
+                <ActionBtn text="📧 بدء الإرسال الجماعي" loading={loading} color="purple" onClick={() => { if (!massDmToken) { setResult('❌ أدخل التوكن'); return }; if (!dmMessage) { setResult('❌ أدخل الرسالة'); return }; api('mass-dm', { token: massDmToken, message: dmMessage }) }} />
               </div></div>
             )}
 
@@ -2993,7 +2981,7 @@ export default function Home() {
                   {/* Activate Button */}
                   <div className="mt-5">
                     <ActionBtn text={spProtectActive ? '🛡️ إيقاف الحماية' : '🛡️ تفعيل الحماية'} loading={spProtectLoading} color="green" onClick={async () => {
-                      if (!spBotToken || !spProtectGuildId) return
+                      if (!spBotToken) { setSpProtectLogs(['❌ أدخل توكن البوت أولاً']); return }
                       setSpProtectLoading(true)
                       setSpProtectLogs([spProtectActive ? '⏳ جاري إيقاف الحماية...' : '⏳ جاري تفعيل الحماية...'])
                       try {
@@ -3002,7 +2990,7 @@ export default function Home() {
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
                             token: spBotToken,
-                            guildId: spProtectGuildId,
+                            guildId: spProtectGuildId || undefined,
                             action: spProtectActive ? 'stop' : 'start',
                             options: spProtectOptions,
                             watchMessages: spWatchMessages,
@@ -3017,6 +3005,9 @@ export default function Home() {
                           setSpProtectActive(!spProtectActive)
                         } else {
                           setSpProtectLogs(['❌ ' + (data.error || 'فشل')])
+                        }
+                        if (data.botInGuild === false) {
+                          setSpProtectLogs(prev => [...prev, '⚠️ البوت غير موجود في السيرفر - تأكد من إضافته'])
                         }
                       } catch { setSpProtectLogs(['❌ خطأ في الاتصال']) }
                       setSpProtectLoading(false)
@@ -4106,22 +4097,17 @@ function FeedbackModal({ show, onClose, type, isPrime, userId, username }: { sho
 }
 
 function VisitorCounter() {
-  const [stats, setStats] = useState({ total: 0, active: 0 })
-  const [mounted, setMounted] = useState(false)
+  const [visitorTotal, setVisitorTotal] = useState(0)
 
   useEffect(() => {
-    setMounted(true)
     const fetchCount = () => {
-      fetch('/api/visitor-count').then(r => r.json()).then(d => { if (d.success) setStats({ total: d.total, active: d.active }) }).catch(() => {})
+      fetch('/api/visitor-count').then(r => r.json()).then(d => {
+        if (d.success) setVisitorTotal(d.total)
+      }).catch(() => {})
     }
     fetchCount()
-    // Ping every 45s to stay active
-    const ping = setInterval(() => {
-      fetch('/api/visitor-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'ping' }) }).catch(() => {})
-    }, 45000)
-    // Refresh count every 30s
-    const refresh = setInterval(fetchCount, 30000)
-    return () => { clearInterval(ping); clearInterval(refresh) }
+    const refresh = setInterval(fetchCount, 60000)
+    return () => { clearInterval(refresh) }
   }, [])
 
   if (!mounted) return null
@@ -4130,9 +4116,7 @@ function VisitorCounter() {
     <div className="fixed bottom-20 right-3 sm:bottom-4 sm:right-4 z-[90]">
       <div className="bg-black/50 backdrop-blur-xl border border-white/[0.1] rounded-2xl px-3 py-2 flex items-center gap-2 shadow-xl shadow-black/30 hover:bg-black/60 transition-all cursor-default">
         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-        <span className="text-[11px] font-bold text-white/80">🟢 {stats.active} متصل</span>
-        <span className="text-[10px] text-white/30">|</span>
-        <span className="text-[10px] text-white/50">👥 {stats.total} زيارة</span>
+        <span className="text-[11px] font-bold text-white/80">👁 {visitorTotal.toLocaleString()} زيارة</span>
       </div>
     </div>
   )
