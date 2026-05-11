@@ -449,10 +449,10 @@ function buildDetailedAnalysis(filename: string, content: string, obfuscation: O
   else if (obfuscation.is_obfuscated && heuristicScore > 30) filePurpose = 'Obfuscated Script with potentially malicious intent'
   else if (peInfo?.detected_packer.length) filePurpose = `Packed Executable (${peInfo.detected_packer.join(', ')})`
 
-  let encryptionStatus = 'Not Encrypted'
-  if (peInfo?.detected_packer.length) encryptionStatus = `Packed (${peInfo.detected_packer.join(', ')})`
-  else if (peInfo?.sections.filter((s) => s.entropy > 7.0).length) encryptionStatus = 'Likely Encrypted'
-  if (obfuscation.is_obfuscated) encryptionStatus = `Obfuscated (${obfuscation.techniques.join(', ')})`
+  let encryption_status = 'Not Encrypted'
+  if (peInfo?.detected_packer.length) encryption_status = `Packed (${peInfo.detected_packer.join(', ')})`
+  else if (peInfo?.sections.filter((s) => s.entropy > 7.0).length) encryption_status = 'Likely Encrypted'
+  if (obfuscation.is_obfuscated) encryption_status = `Obfuscated (${obfuscation.techniques.join(', ')})`
 
   let riskLevel: DetailedAnalysis['risk_level'] = 'safe'
   if (heuristicScore >= 60 || patterns.some((p) => p.severity >= 10)) riskLevel = 'critical'
