@@ -943,7 +943,7 @@ export default function Home() {
                   </div>
 
                   {/* Method 3: Manual Key */}
-                  <button onClick={() => { setTwoFaStep('manual'); setTwoFaScanningError('') }} className="w-full py-4 rounded-2xl font-bold text-sm cursor-pointer bg-purple-500/15 text-purple-400 border border-purple-500/25 hover:bg-purple-500/25 transition-all active:scale-[0.98] flex items-center justify-center gap-3">
+                  <button onClick={() => { setTwoFaStep('manual') }} className="w-full py-4 rounded-2xl font-bold text-sm cursor-pointer bg-purple-500/15 text-purple-400 border border-purple-500/25 hover:bg-purple-500/25 transition-all active:scale-[0.98] flex items-center justify-center gap-3">
                     <span className="text-xl">⌨️</span>
                     <div className="text-left"><span className="block text-sm">إدخال يدوي</span><span className="block text-[10px] text-purple-400/50">أدخل 2FA Key من ديسكورد يدوياً</span></div>
                   </button>
