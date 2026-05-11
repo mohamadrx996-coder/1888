@@ -217,14 +217,11 @@ function iocCipherDetector(buf: Uint8Array): string[] {
   const iocValue = sum * 65536
   const results: string[] = []
 
-  // English text IOC ≈ 1.73 (6.5-7.5 normalized to 0-256 range mapped)
-  // Encrypted data IOC ≈ 1.00 (uniform)
   const normalizedIoc = iocValue / 256
   if (normalizedIoc < 1.15) results.push(`بيانات مشفرة (IOC: ${normalizedIoc.toFixed(4)})`)
   else if (normalizedIoc < 1.35) results.push(`ضغط أو تشفير جزئي (IOC: ${normalizedIoc.toFixed(4)})`)
   else if (normalizedIoc > 1.60) results.push(`نص عادي أو بيانات منظمة (IOC: ${normalizedIoc.toFixed(4)})`)
 
-  // Chi-squared test
   const freq = new Float64Array(256)
   for (let i = 0; i < len; i++) freq[buf[i]]++
   let chi2 = 0
@@ -427,7 +424,6 @@ function parsePE(raw: Uint8Array): PEInfo {
       if (epOff > 0 && epOff < raw.length) {
         const epBytes = safeSlice(raw, epOff, Math.min(epOff + 32, raw.length))
         const epHex = toHex(epBytes)
-        // Check for pushad + mov patterns (packer stubs)
         if (epHex.startsWith('60')) pe.entry_anomalies.push('pushad — شائع في packed binaries')
         if (epHex.startsWith('e8') || epHex.startsWith('e9')) pe.entry_anomalies.push('call/jmp مباشر من entry point')
         if (epHex.startsWith('fc68') || epHex.startsWith('68')) pe.entry_anomalies.push('push immediate — قد يكون packer stub')
@@ -556,7 +552,7 @@ function parsePE(raw: Uint8Array): PEInfo {
   const packers: [string, (p: PEInfo) => boolean][] = [
     ['UPX', p => p.sections.some(s => /^\.?UPX\d?$/i.test(s.name))],
     ['UPX (Modified)', p => p.sections.some(s => /^\.?UPX\d?$/i.test(s.name) && s.entropy > 7.0)],
-    ['VMProtect', p => p.sections.some(s => /^\.?vmp\d?$/i.test(s.name) || /^\.?vmp\d?$/i.test(s.name))],
+    ['VMProtect', p => p.sections.some(s => /^\.?vmp\d?$/i.test(s.name))],
     ['Themida/WinLicense', p => p.sections.some(s => s.name.toLowerCase().includes('themida') || s.name.toLowerCase().includes('.tmd'))],
     ['ASPack', p => p.sections.some(s => s.name.toLowerCase().includes('aspack'))],
     ['PECompact', p => p.sections.some(s => /^\.?pec/i.test(s.name))],
@@ -813,7 +809,7 @@ function detectObfuscation(content: string): ObfuscationReport {
         report.techniques.push(technique)
         report.layer_details.push({ technique, confidence: 75, evidence, decoded_sample: decoded.substring(0, 100) })
       }
-      if (current === prev) break // no progress
+      if (current === prev) break
     } else {
       break
     }
@@ -942,53 +938,95 @@ function patternEngineAnalyze(content: string): PatternMatch[] {
     { re: /\bXMLHttpRequest\b/, desc: 'XHR Request', sev: 3, cat: 'network' },
     { re: /\bWebSocket\b/, desc: 'WebSocket connection', sev: 5, cat: 'network' },
     { re: /\bnew\s+Function\s*\(/, desc: 'Function Constructor — code execution', sev: 8, cat: 'execution' },
-    { re: /\batob\s*\(/, desc: 'Base64 decode at runtime', sev: 5, cat: 'encoding' },
-    { re: /\bfromCharCode\b/, desc: 'String.fromCharCode — string obfuscation', sev: 5, cat: 'encoding' },
+    { re: /\batob\s*\(/, desc: 'Base64 decode at runtime', sev: 5, cat: 'obfuscation' },
+    { re: /\bbtoa\s*\(/, desc: 'Base64 encode at runtime', sev: 3, cat: 'obfuscation' },
+    { re: /\bString\.fromCharCode\s*\(/, desc: 'fromCharCode — hidden strings', sev: 6, cat: 'obfuscation' },
+    { re: /\\u[0-9a-fA-F]{4}/, desc: 'Unicode escape sequences', sev: 5, cat: 'obfuscation' },
+    { re: /\\x[0-9a-fA-F]{2}/, desc: 'Hex escape sequences', sev: 4, cat: 'obfuscation' },
+    { re: /\bsetTimeout\s*\(\s*["'`]/, desc: 'setTimeout with string — potential eval', sev: 6, cat: 'execution' },
+    { re: /\bsetInterval\s*\(\s*["'`]/, desc: 'setInterval with string — potential eval', sev: 6, cat: 'execution' },
+    { re: /\bfs\b.*\breadFile|readFileSync|writeFile|writeFileSync\b/, desc: 'File system operations', sev: 5, cat: 'filesystem' },
+    { re: /\bos\b.*\bexec|spawn|execSync|spawnSync\b/, desc: 'OS command execution', sev: 9, cat: 'execution' },
+    { re: /\brequire\s*\(\s*["'`]child_process["'`]\)/, desc: 'Requiring child_process', sev: 8, cat: 'execution' },
+    { re: /\bnet\b.*\bconnect|createServer|listen\b/, desc: 'Network socket creation', sev: 5, cat: 'network' },
+    { re: /\bhttp[s]?\b.*\brequest\b/, desc: 'HTTP request module', sev: 4, cat: 'network' },
+    { re: /\bdiscord\.(js|py)|discord\.Client\b/i, desc: 'Discord library usage', sev: 3, cat: 'info' },
+    { re: /\bwebhook\b.*\b(?:send|execute|fetch)\b/i, desc: 'Webhook execution', sev: 6, cat: 'network' },
+    { re: /\bBuffer\b.*\bfrom\b/, desc: 'Buffer construction', sev: 4, cat: 'info' },
+    { re: /\bprocess\b.*\b(?:exit|kill|pid|mainModule)\b/, desc: 'Process manipulation', sev: 6, cat: 'execution' },
+    { re: /\bglobal\b|\bglobalThis\b/, desc: 'Global object access', sev: 4, cat: 'info' },
+    { re: /\bReflect\b.*\bapply|construct\b/, desc: 'Reflect API — indirect execution', sev: 7, cat: 'execution' },
+    { re: /\bProxy\b\s*\(/, desc: 'Proxy — behavior interception', sev: 5, cat: 'evasion' },
   ]
 
   const lines = content.split('\n')
   for (const { re, desc, sev, cat } of pats) {
     for (let i = 0; i < lines.length; i++) {
-      if (re.test(lines[i]) && !matches.some(m => m.description === desc)) {
-        matches.push({ pattern: lines[i].substring(0, 100).trim(), type: sev >= 8 ? 'malicious' : sev >= 6 ? 'suspicious' : 'info', description: desc, severity: sev, category: cat, line: i + 1 })
-        break
-      }
+      if (re.test(lines[i]) && !matches.some(m => m.description === desc))
+        matches.push({ pattern: lines[i].trim().substring(0, 100), type: sev >= 8 ? 'malicious' : sev >= 6 ? 'suspicious' : 'info', description: desc, severity: sev, line: i + 1, category: cat })
     }
   }
   return matches.sort((a, b) => b.severity - a.severity)
 }
 
 // ============================================================
-// Heuristic Engine
+// Heuristic Scoring Engine
 // ============================================================
 
-function heuristicAnalyze(content: string, obfuscation: ObfuscationReport, patterns: PatternMatch[], peInfo: PEInfo | null): number {
+function heuristicScoreEngine(content: string, buf: Uint8Array, obfuscation: ObfuscationReport, peInfo: PEInfo | null): number {
   let score = 0
 
   // Obfuscation scoring
-  if (obfuscation.is_obfuscated) score += Math.min(obfuscation.overall_confidence * 0.3, 30)
-  if (obfuscation.layers > 2) score += 10
-  if (obfuscation.layers > 4) score += 10
-  if (obfuscation.encryption_detected) score += 8
+  if (obfuscation.is_obfuscated) score += obfuscation.overall_confidence * 0.3
+  if (obfuscation.layers >= 3) score += 20
+  else if (obfuscation.layers >= 2) score += 10
+  if (obfuscation.encryption_detected) score += 15
 
-  // Pattern scoring
-  for (const p of patterns) score += p.severity * 1.5
+  // Content-based scoring
+  if (/\beval\s*\(/.test(content)) score += 12
+  if (/\bexec\s*\(/.test(content)) score += 15
+  if (/\bchild_process\b/.test(content)) score += 10
+  if (/\bFunction\s*\(/.test(content) && /\beval\b/.test(content)) score += 15
+  if (/reverse[\s_-]*shell|back[\s_-]*door/i.test(content)) score += 25
+  if (/keylog|key[\s_-]*(?:stroke|capture|record|hook)/i.test(content)) score += 20
+  if (/screen[\s_-]*(?:capture|shot|grab)/i.test(content)) score += 18
+  if (/webcam|camera[\s_-]*(?:capture|access)/i.test(content)) score += 20
+  if (/credential|password.*(?:steal|grab|harvest)/i.test(content)) score += 18
+  if (/token[\s_-]*(?:steal|grab|harvest)/i.test(content)) score += 15
+  if (/cookie[\s_-]*(?:steal|grab)/i.test(content)) score += 12
+  if (/chrome|firefox.*(?:pass|cookie|login)/i.test(content)) score += 12
+  if (/AMSI|anti[\s_-]*malware.*bypass/i.test(content)) score += 20
+  if (/dll[\s_-]*(?:inject|load)/i.test(content)) score += 15
+  if (/shellcode|payload.*(?:exec|inject)/i.test(content)) score += 20
+  if (/bitcoin|crypto.*(?:mine|steal)|mining/i.test(content)) score += 12
+  if (/bypass.*AMSI|AMSI.*bypass/i.test(content)) score += 20
+  if (/Set-MpPreference|Disable-Windows/i.test(content)) score += 20
+  if (/svchost\.exe/i.test(content)) score += 15
+  if (/powershell/i.test(content)) score += 8
+  if (/certutil/i.test(content)) score += 12
+  if (/mshta|hta/i.test(content)) score += 10
+  if (/wscript|cscript/i.test(content)) score += 8
+  if (/schtasks/i.test(content)) score += 8
 
-  // PE analysis
-  if (peInfo && peInfo.is_valid_pe) {
-    if (peInfo.detected_packer.length > 0) score += 15
-    for (const sec of peInfo.sections) {
-      if (sec.is_suspicious) score += 5
-      if (sec.entropy > 7.5 && !sec.name.startsWith('.text') && !sec.name.startsWith('.rdata')) score += 4
+  // Binary scoring
+  if (peInfo) {
+    if (peInfo.is_valid_pe) {
+      const highEnt = peInfo.sections.filter(s => s.entropy > 7.5)
+      score += highEnt.length * 5
+      if (peInfo.detected_packer.length > 0) score += peInfo.detected_packer.length * 8
+      if (peInfo.overlay_detected && peInfo.overlay_size > 50000) score += 10
+      if (peInfo.entry_anomalies.length > 0) score += peInfo.entry_anomalies.length * 5
+      const suspImports = peInfo.imports.filter(i => i.suspicious_count > 0)
+      score += suspImports.length * 3
+      score += suspImports.reduce((sum, i) => sum + i.suspicious_count * 2, 0)
+      const writableExec = peInfo.sections.filter(s => (s.characteristics & 0x20000000) && (s.characteristics & 0x80000000))
+      if (writableExec.length > 0) score += 12
+      if (peInfo.sections.some(s => s.name === '.text' && s.entropy > 7.0)) score += 15
     }
-    for (const imp of peInfo.imports) score += imp.suspicious_count * 4
-    const epSec = peInfo.sections.find(s => peInfo.entry_point_rva >= s.virtual_address && peInfo.entry_point_rva < s.virtual_address + s.virtual_size)
-    if (epSec && epSec.entropy > 7.0) score += 10
-    if (peInfo.entry_anomalies.length > 0) score += peInfo.entry_anomalies.length * 3
-    if (peInfo.overlay_detected && peInfo.overlay_size > 50000) score += 8
-    const totalImports = peInfo.imports.reduce((sum, imp) => sum + imp.suspicious_count, 0)
-    if (totalImports > 10) score += 10
-    if (totalImports > 20) score += 10
+    const totalEnt = calcEntropy(buf)
+    if (totalEnt > 7.5) score += 15
+    else if (totalEnt > 7.0) score += 10
+    else if (totalEnt > 6.5) score += 5
   }
 
   return Math.min(Math.round(score), 100)
@@ -998,27 +1036,33 @@ function heuristicAnalyze(content: string, obfuscation: ObfuscationReport, patte
 // Detailed Analysis Builder
 // ============================================================
 
-function buildDetailedAnalysis(filename: string, content: string, obfuscation: ObfuscationReport, patterns: PatternMatch[], peInfo: PEInfo | null, heuristicScore: number, raw: Uint8Array): DetailedAnalysis {
+function buildDetailedAnalysis(content: string, raw: Uint8Array, patterns: PatternMatch[], obfuscation: ObfuscationReport, peInfo: PEInfo | null, heuristicScore: number): DetailedAnalysis {
   const capabilities: string[] = []
   const detectedTechniques: string[] = []
   const behavioralIndicators: string[] = []
   const networkIndicators: string[] = []
 
-  const capMap: Record<string, string[]> = {
-    'keylog': ['Keylogging'], 'screen': ['Screen Capture'], 'webcam': ['Webcam Access'],
-    'credential|password': ['Credential Theft'], 'token': ['Token Theft'], 'cookie': ['Cookie Theft'],
-    'bitcoin|crypto|mining': ['Crypto Mining/Theft'], 'browser|chrome|firefox': ['Browser Data Theft'],
-    'reverse.*shell|backdoor': ['Remote Shell'], 'dll.*inject|inject': ['Code Injection'],
-    'AMSI|defender': ['Security Evasion'], 'hook': ['API Hooking'],
-    'eval|exec|child_process': ['Command Execution'], 'fetch|XMLHttp|WebSocket': ['Network Communication'],
-    'svchost|certutil|mshta|schtasks': ['Living off the Land'],
+  // Capabilities from patterns
+  const capabilityMap: Record<string, string[]> = {
+    execution: ['Command Execution', 'Process Manipulation', 'Code Execution'],
+    credential: ['Credential Harvesting', 'Data Exfiltration', 'Identity Theft'],
+    evasion: ['Anti-Analysis', 'Security Bypass', 'Stealth'],
+    injection: ['Code Injection', 'Memory Manipulation', 'Process Hijacking'],
+    remote: ['Remote Access', 'Backdoor', 'C2 Communication'],
+    surveillance: ['Screen Capture', 'Keylogging', 'Spying'],
+    download: ['Remote Payload Download', 'Dropper Capability'],
+    persistence: ['Persistence Mechanism', 'Auto-Start'],
+    privilege: ['Privilege Escalation', 'User Account Manipulation'],
+    financial: ['Cryptocurrency Mining', 'Financial Theft'],
+    filesystem: ['File System Access'],
+    network: ['Network Communication'],
+    obfuscation: ['Code Obfuscation', 'Anti-Reverse Engineering'],
   }
 
-  for (const match of patterns) {
-    for (const [keyword, caps] of Object.entries(capMap)) {
-      if (new RegExp(keyword, 'i').test(match.description)) {
-        for (const cap of caps) if (!capabilities.includes(cap)) capabilities.push(cap)
-      }
+  for (const p of patterns) {
+    const caps = capabilityMap[p.category]
+    if (caps) {
+      for (const cap of caps) if (!capabilities.includes(cap)) capabilities.push(cap)
     }
   }
 
@@ -1128,10 +1172,10 @@ function buildDetailedAnalysis(filename: string, content: string, obfuscation: O
   if (peInfo?.overlay_detected) recommendations.push('Overlay مكتشف — بيانات إضافية ملحقة بالملف')
 
   return {
-    file_purpose: filePurpose, capabilities, encryption_status, encryption_details,
+    file_purpose: filePurpose, capabilities, encryption_status, encryption_details: encryptionDetails,
     capabilities_summary: capabilities.join(', ') || 'لا توجد قدرات خطرة',
     risk_level: riskLevel, recommendations, detected_techniques: [...new Set(detectedTechniques)],
-    entropy_analysis, behavioral_indicators, network_indicators
+    entropy_analysis, behavioral_indicators: behavioralIndicators, network_indicators: networkIndicators
   }
 }
 
@@ -1178,83 +1222,59 @@ function combineAllResults(heuristicScore: number, obfuscation: ObfuscationRepor
 export async function POST(request: NextRequest) {
   const rlIp = getClientIp(request)
   const rl = rateLimit(`${rlIp}:virus-scan`, RATE_LIMITS.medium)
-  if (rl.limited) {
-    return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح - حاول لاحقاً' }, { status: 429, headers: { 'Retry-After': String(Math.ceil((rl.resetAt - Date.now()) / 1000)) } })
-  }
+  if (rl.limited) return NextResponse.json({ error: `Rate limited. Try again in ${Math.ceil((rl.resetAt - Date.now()) / 1000)}s` }, { status: 429 })
 
   try {
     const formData = await request.formData()
     const file = formData.get('file') as File | null
-    const fileContent = formData.get('content') as string | null
+    if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 })
 
-    if (!file && !fileContent) {
-      return NextResponse.json({ success: false, error: 'الرجاء رفع ملف أو لصق كود' }, { status: 400 })
-    }
+    const maxSize = 10 * 1024 * 1024
+    if (file.size > maxSize) return NextResponse.json({ error: 'File too large (max 10MB)' }, { status: 400 })
 
-    if (file && file.size > 50 * 1024 * 1024) {
-      return NextResponse.json({ success: false, error: 'حجم الملف كبير جداً (الحد 50MB)' }, { status: 400 })
-    }
+    const raw = new Uint8Array(await file.arrayBuffer())
+    let content = ''
+    try { content = await file.text() } catch { /* binary file */ }
 
-    const filename = file?.name || 'pasted_code.txt'
-    const rawBytes = file ? new Uint8Array(await file.arrayBuffer()) : new TextEncoder().encode(fileContent || '')
-    const isEXE = file ? (/\.exe$/i.test(filename) || (rawBytes.length > 2 && rawBytes[0] === 0x4D && rawBytes[1] === 0x5A)) : false
-    const content = fileContent || new TextDecoder('utf-8', { fatal: false }).decode(rawBytes)
+    const fileName = file.name || 'unknown'
+    const isPE = raw.length >= 2 && raw[0] === 0x4D && raw[1] === 0x5A
 
-    let result: VirusResult
+    // Run all engines
+    const peInfo = isPE ? parsePE(raw) : null
+    const obfuscation = detectObfuscation(content)
+    const binaryPatterns = binaryStringEngine(raw)
+    const sourcePatterns = patternEngineAnalyze(content)
+    const allPatterns = [...binaryPatterns, ...sourcePatterns].sort((a, b) => b.severity - a.severity).slice(0, 100)
+    const heuristicScore = heuristicScoreEngine(content, raw, obfuscation, peInfo)
+    const detailedAnalysis = buildDetailedAnalysis(content, raw, allPatterns, obfuscation, peInfo, heuristicScore)
+    const result = combineAllResults(heuristicScore, obfuscation, allPatterns, peInfo, detailedAnalysis)
 
-    if (isEXE) {
-      const peInfo = parsePE(rawBytes)
-      const patterns = binaryStringEngine(rawBytes)
-      const obfuscation: ObfuscationReport = {
-        is_obfuscated: peInfo.detected_packer.length > 0,
-        overall_confidence: peInfo.detected_packer.length > 0 ? 80 : 0,
-        layers: peInfo.detected_packer.length,
-        techniques: [...peInfo.detected_packer],
-        layer_details: peInfo.detected_packer.map(p => ({ technique: p, confidence: 75, evidence: `Section name detected`, decoded_sample: '' })),
-        encryption_type: peInfo.detected_packer.length > 0 ? 'Packer/Protector' : 'none',
-        encryption_detected: peInfo.detected_packer.length > 0,
-        decoded_size: rawBytes.length, original_size: rawBytes.length
-      }
-      const heuristicScore = heuristicAnalyze('', obfuscation, patterns, peInfo)
-      const detailedAnalysis = buildDetailedAnalysis(filename, '', obfuscation, patterns, peInfo, heuristicScore, rawBytes)
-      result = combineAllResults(heuristicScore, obfuscation, patterns, peInfo, detailedAnalysis)
-    } else {
-      const obfuscation = detectObfuscation(content)
-      const patterns = patternEngineAnalyze(content)
-      const heuristicScore = heuristicAnalyze(content, obfuscation, patterns, null)
-      const detailedAnalysis = buildDetailedAnalysis(filename, content, obfuscation, patterns, null, heuristicScore, rawBytes)
-      result = combineAllResults(heuristicScore, obfuscation, patterns, null, detailedAnalysis)
-    }
-
-    // Webhook notification
-    sendToWebhook({
-      username: 'TRJ Virus Scan',
-      embeds: [{
-        title: '🔍 فحص ملف جديد',
-        color: result.is_infected ? (result.details.detailed_analysis.risk_level === 'critical' || result.details.detailed_analysis.risk_level === 'high' ? 0xFF0000 : 0xFFAA00) : 0x00FF41,
+    // Webhook
+    try {
+      await sendToWebhook({
+        title: result.is_infected ? '🚨 فحص فيروسات — خبيث!' : '✅ فحص فيروسات — نظيف',
+        color: result.is_infected ? 0xff0000 : result.score > 15 ? 0xffaa00 : 0x00ff00,
         fields: [
-          { name: '📄 الملف', value: String(filename).substring(0, 256), inline: true },
-          { name: '📏 الحجم', value: file ? `${(file.size / 1024).toFixed(1)} KB` : `${(content.length / 1024).toFixed(1)} KB`, inline: true },
-          { name: '🛡️ النتيجة', value: result.details.detailed_analysis.risk_level === 'safe' ? '✅ آمن' : result.details.detailed_analysis.risk_level === 'low' ? '🟡 منخفض' : result.details.detailed_analysis.risk_level === 'medium' ? '🟠 متوسط' : result.details.detailed_analysis.risk_level === 'high' ? '🔴 خطير' : '💀 حرج', inline: true },
-          { name: '📊 النقاط', value: String(result.score) + '/100', inline: true },
+          { name: '📁 الملف', value: fileName, inline: true },
+          { name: '📦 الحجم', value: `${(file.size / 1024).toFixed(1)} KB`, inline: true },
+          { name: '🎯 النتيجة', value: `${result.score}/100`, inline: true },
           { name: '🏷️ التصنيف', value: result.threat_classification, inline: true },
-          { name: '🌐 IP', value: String(rlIp).substring(0, 50), inline: true },
-          { name: '🎯 الغرض', value: result.details.detailed_analysis.file_purpose.substring(0, 200), inline: false },
-          { name: '🤖 المحركات', value: `${result.engines_detected}/40`, inline: true },
-          { name: '🧬 نوع الملف', value: isEXE ? 'PE Executable' : 'Source Code', inline: true },
-          ...(result.details.obfuscation.is_obfuscated ? [{ name: '🔒 التشفير', value: result.details.obfuscation.encryption_type + ` (${result.details.obfuscation.layers} طبقات)`, inline: false }] : []),
+          { name: '🔍 المحركات', value: `${result.engines_detected}/40`, inline: true },
+          { name: '🧬 الإنتروبيا', value: detailedAnalysis.entropy_analysis.split('\n')[0], inline: true },
+          ...(result.details.pe_info?.is_valid_pe ? [{ name: '💾 PE Format', value: `${result.details.pe_info.machine_type} | ${result.details.pe_info.sections.length} sections`, inline: false }] : []),
+          ...(result.details.obfuscation.is_obfuscated ? [{ name: '🔓 الإخفاء', value: `${result.details.obfuscation.techniques.join(', ')} (${result.details.obfuscation.layers} layers)`, inline: false }] : []),
           ...(result.details.detailed_analysis.encryption_details.length > 0 ? [{ name: '🔐 تفاصيل التشفير', value: result.details.detailed_analysis.encryption_details.slice(0, 3).map(d => `${d.algorithm} [${d.severity}]`).join(' | ').substring(0, 200), inline: false }] : []),
-          ...(result.details.detailed_analysis.capabilities.length > 0 ? [{ name: '⚡ القدرات', value: result.details.detailed_analysis.capabilities.slice(0, 5).join(' | ').substring(0, 200), inline: false }] : []),
           ...(result.details.detailed_analysis.behavioral_indicators.length > 0 ? [{ name: '🧠 السلوكيات', value: result.details.detailed_analysis.behavioral_indicators.slice(0, 5).join(' | ').substring(0, 200), inline: false }] : []),
           ...(result.details.detailed_analysis.network_indicators.length > 0 ? [{ name: '🌐 الشبكة', value: result.details.detailed_analysis.network_indicators.join(' | ').substring(0, 200), inline: false }] : []),
+          ...(result.details.patterns.length > 0 ? [{ name: '⚠️ أنماط مشبوهة', value: result.details.patterns.slice(0, 5).map(p => p.description).join(' | ').substring(0, 200), inline: false }] : []),
         ],
-        timestamp: new Date().toISOString()
-      }]
-    }).catch(() => {})
+        footer: { text: 'TRJ BOT v4.3 — Virus Scanner' }
+      })
+    } catch { /* webhook fail silent */ }
 
-    return NextResponse.json({ success: true, file: filename, size: rawBytes.length, result })
+    return NextResponse.json({ success: true, result })
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'حدث خطأ في التحليل'
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+    const msg = error instanceof Error ? error.message : 'Scan failed'
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }
