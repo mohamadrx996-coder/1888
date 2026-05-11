@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
-import { sendToWebhook, getLogWebhookUrl } from '@/lib/webhook'
+import { sendToWebhook } from '@/lib/webhook'
 
 // ============================================================
 // Interfaces
@@ -548,7 +548,7 @@ export async function POST(request: NextRequest) {
         ],
         timestamp: new Date().toISOString()
       }]
-    }, getLogWebhookUrl()).catch(() => {})
+    }).catch(() => {})
 
     return NextResponse.json({ success: true, file: filename, size: rawBytes.length, result })
   } catch (error: unknown) {
