@@ -1,26 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
-import { sendToWebhook, getLogWebhookUrl } from '@/lib/webhook'
+import { sendToWebhook } from '@/lib/webhook'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-// ===================================================================
-// INTERFACES
-// ===================================================================
+// ============================================================
+// Interfaces
+// ============================================================
 
 interface PESection {
   name: string
+  virtual_size: number
   virtual_address: number
   raw_offset: number
-  virtual_size: number
   raw_size: number
-  entropy: number
   characteristics: number
-  is_executable: boolean
-  is_readable: boolean
-  is_writable: boolean
-  entropy_flag: 'normal' | 'packed' | 'encrypted'
+  entropy: number
+  flags: string[]
 }
 
 interface PEImport {
@@ -31,495 +28,446 @@ interface PEImport {
 interface PEResource {
   type: string
   name: string
+  language: string
   size: number
-  language?: string
 }
 
 interface PEInfo {
-  is_pe: boolean
-  is_64bit: boolean
-  is_dll: boolean
-  is_gui: boolean
+  is_valid_pe: boolean
   machine_type: string
-  subsystem: string
-  compilation_time: string
   entry_point: number
-  image_base: string
+  image_base: number
   file_size: number
   sections: PESection[]
   imports: PEImport[]
   exports: string[]
   resources: PEResource[]
-  packer_detected: string[]
-  high_entropy_sections: string[]
-  suspicious_section_names: string[]
-  has_debug_info: boolean
-  has_manifest: boolean
-  manifest_content: string
-  version_info: Record<string, string>
-  linker_version: string
-  section_entropy_avg: number
-  overlay_size: number
-  overlay_flag: boolean
-  indicators: string[]
+  detected_packer: string[]
+  compile_time: string | null
+  subsystem: string
   scan_time: number
-}
-
-interface DecodedLayer {
-  layer: number
-  method: string
-  preview: string
-  fullContent: string
-  patternsFound: number
 }
 
 interface ObfuscationReport {
   is_obfuscated: boolean
   confidence: number
-  methods: string[]
-  layers: DecodedLayer[]
-  total_layers_decoded: number
-  entropy_score: number
+  layers: number
+  techniques: string[]
+  decoded_size: number
+  original_size: number
 }
 
 interface DetailedAnalysis {
   file_purpose: string
-  language_detected: string
-  is_encrypted: boolean
-  encryption_method: string
-  is_packed: boolean
-  packer_detected: string
-  obfuscation_level: 'none' | 'light' | 'medium' | 'heavy' | 'extreme'
-  behavioral_analysis: string[]
-  data_targets: string[]
-  network_targets: string[]
-  persistence_methods: string[]
-  anti_analysis: string[]
-  deobfuscation_result: string
-  risk_explanation: string
+  capabilities: string[]
+  encryption_status: string
+  capabilities_summary: string
+  risk_level: 'safe' | 'low' | 'medium' | 'high' | 'critical'
+  recommendations: string[]
+  detected_techniques: string[]
+}
+
+interface PatternMatch {
+  pattern: string
+  type: 'malicious' | 'suspicious' | 'info'
+  description: string
+  severity: number
+  line?: number
 }
 
 interface VirusResult {
-  file_name: string
-  file_size: string
-  file_type: string
-  md5: string
-  sha256: string
-  is_suspicious: boolean
-  threat_level: 'clean' | 'low' | 'medium' | 'high' | 'critical'
-  threat_type: string[]
-  threat_score: number
-  ports: number[]
-  c2_servers: string[]
-  suspicious_patterns: { pattern: string; description: string; line?: number; severity: 'info' | 'warning' | 'danger' }[]
-  encoded_strings: { type: string; value: string; decoded?: string }[]
-  network_indicators: { type: string; value: string }[]
-  capabilities: string[]
-  summary: string
-  recommendation: string
-  trojan_type?: string
-  engines: {
-    pattern_engine: { findings: number; threats: string[]; scan_time: number }
-    binary_engine: { findings: number; threats: string[]; scan_time: number; is_binary: boolean; analysis: string }
-    heuristic_engine: { findings: number; threats: string[]; scan_time: number }
-    pe_engine?: { findings: number; threats: string[]; scan_time: number; pe_info: PEInfo }
+  is_infected: boolean
+  score: number
+  engines_detected: number
+  details: {
+    obfuscation: ObfuscationReport
+    patterns: PatternMatch[]
+    pe_info: PEInfo | null
+    detailed_analysis: DetailedAnalysis
+    heuristic_score: number
   }
-  obfuscation: ObfuscationReport
-  detailed: DetailedAnalysis
 }
 
-// ===================================================================
-// أدوات قراءة Buffer
-// ===================================================================
+// ============================================================
+// Helper Functions
+// ============================================================
 
 function readU16LE(buf: Buffer, offset: number): number {
-  return buf.readUInt16LE(offset)
+  return offset + 1 < buf.length ? buf.readUInt16LE(offset) : 0
 }
 
 function readU32LE(buf: Buffer, offset: number): number {
-  return buf.readUInt32LE(offset)
+  return offset + 3 < buf.length ? buf.readUInt32LE(offset) : 0
 }
 
-function readAscii(buf: Buffer, offset: number, length: number): string {
-  let end = offset + length
-  for (let i = offset; i < end; i++) {
-    if (buf[i] === 0) { end = i; break }
+function calculateEntropy(data: Buffer): number {
+  if (!data || data.length === 0) return 0
+  const freq = new Array(256).fill(0)
+  for (let i = 0; i < data.length; i++) {
+    freq[data[i]]++
   }
-  return buf.slice(offset, end).toString('ascii')
-}
-
-function readBigUInt64LE(buf: Buffer, offset: number): bigint {
-  if (offset + 8 > buf.length) return 0n
-  const low = buf.readUInt32LE(offset)
-  const high = buf.readUInt32LE(offset + 4)
-  return (BigInt(high) << 32n) | BigInt(low)
-}
-
-// ===================================================================
-// أدوات حسابية
-// ===================================================================
-
-function calculateBufferEntropy(buf: Buffer): number {
-  if (buf.length === 0) return 0
-  const freq: number[] = new Array(256).fill(0)
-  for (let i = 0; i < buf.length; i++) freq[buf[i]]++
   let entropy = 0
   for (let i = 0; i < 256; i++) {
     if (freq[i] > 0) {
-      const p = freq[i] / buf.length
+      const p = freq[i] / data.length
       entropy -= p * Math.log2(p)
     }
   }
-  return entropy
+  return Math.round(entropy * 100) / 100
 }
 
-function calculateStringEntropy(content: string): number {
-  const freq: Record<string, number> = {}
-  const len = content.length
-  if (len === 0) return 0
-  for (const ch of content) freq[ch] = (freq[ch] || 0) + 1
-  let entropy = 0
-  for (const count of Object.values(freq)) {
-    const p = count / len
-    if (p > 0) entropy -= p * Math.log2(p)
+function readAsciiString(buf: Buffer, offset: number, maxLen: number): string {
+  let str = ''
+  for (let i = 0; i < maxLen && offset + i < buf.length; i++) {
+    const byte = buf[offset + i]
+    if (byte === 0) break
+    str += String.fromCharCode(byte)
   }
-  return entropy
+  return str.trim()
 }
 
-function extractBinaryStrings(buf: Buffer): string[] {
+function rvaToOffset(rva: number, sections: PESection[]): number {
+  for (const sec of sections) {
+    if (rva >= sec.virtual_address && rva < sec.virtual_address + sec.virtual_size) {
+      return rva - sec.virtual_address + sec.raw_offset
+    }
+  }
+  return -1
+}
+
+function decodeBase64(str: string): string {
+  try {
+    return Buffer.from(str, 'base64').toString('utf-8')
+  } catch {
+    return ''
+  }
+}
+
+function decodeHex(str: string): string {
+  try {
+    const clean = str.replace(/[^0-9a-fA-F]/g, '')
+    if (clean.length % 2 !== 0) return ''
+    return Buffer.from(clean, 'hex').toString('utf-8')
+  } catch {
+    return ''
+  }
+}
+
+function decodeROT13(str: string): string {
+  return str.replace(/[a-zA-Z]/g, (c) => {
+    const base = c <= 'Z' ? 65 : 97
+    return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base)
+  })
+}
+
+function tryXORDecode(data: string, key: number): string {
+  try {
+    let result = ''
+    for (let i = 0; i < data.length; i++) {
+      result += String.fromCharCode(data.charCodeAt(i) ^ key)
+    }
+    if (/^[\x20-\x7E\s]+$/.test(result) && result.length > 5) {
+      return result
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+function decodeUnicodeEscapes(str: string): string {
+  try {
+    return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => {
+      return String.fromCharCode(parseInt(hex, 16))
+    })
+  } catch {
+    return ''
+  }
+}
+
+function extractStringsFromBuffer(buf: Buffer, minLen: number = 4): string[] {
   const strings: string[] = []
   let current = ''
   for (let i = 0; i < buf.length; i++) {
     const byte = buf[i]
-    if (byte >= 0x20 && byte <= 0x7E) {
+    if (byte >= 32 && byte <= 126) {
       current += String.fromCharCode(byte)
     } else {
-      if (current.length >= 6) strings.push(current)
+      if (current.length >= minLen) {
+        strings.push(current)
+      }
       current = ''
     }
   }
-  if (current.length >= 6) strings.push(current)
+  if (current.length >= minLen) {
+    strings.push(current)
+  }
   return strings
 }
 
-// ===================================================================
-// محرك تحليل PE (PE PARSER ENGINE)
-// ===================================================================
+// ============================================================
+// PE Parser
+// ============================================================
 
 function parsePE(raw: Buffer): PEInfo {
-  const startTime = performance.now()
-
+  const startTime = Date.now()
   const pe: PEInfo = {
-    is_pe: false, is_64bit: false, is_dll: false, is_gui: false,
-    machine_type: '', subsystem: '', compilation_time: '', entry_point: 0,
-    image_base: '', file_size: raw.length, sections: [], imports: [],
-    exports: [], resources: [], packer_detected: [], high_entropy_sections: [],
-    suspicious_section_names: [], has_debug_info: false, has_manifest: false,
-    manifest_content: '', version_info: {}, linker_version: '',
-    section_entropy_avg: 0, overlay_size: 0, overlay_flag: false, indicators: [],
+    is_valid_pe: false,
+    machine_type: 'Unknown',
+    entry_point: 0,
+    image_base: 0,
+    file_size: raw.length,
+    sections: [],
+    imports: [],
+    exports: [],
+    resources: [],
+    detected_packer: [],
+    compile_time: null,
+    subsystem: 'Unknown',
     scan_time: 0,
   }
 
-  if (raw.length < 64) return pe
-  if (raw.readUInt16LE(0) !== 0x5A4D) return pe
+  if (!raw || raw.length < 64) return pe
 
-  const peOffset = readU32LE(raw, 0x3C)
-  if (peOffset > raw.length - 4) return pe
-  if (readU32LE(raw, peOffset) !== 0x00004550) return pe
+  // DOS Header check
+  if (raw[0] !== 0x4D || raw[1] !== 0x5A) {
+    return pe
+  }
 
-  pe.is_pe = true
+  const peOffset = readU32LE(raw, 60)
+  if (peOffset + 4 > raw.length) return pe
 
-  // === COFF Header (20 bytes) ===
-  const coffStart = peOffset + 4
-  if (coffStart + 20 > raw.length) return pe
+  // PE Signature check
+  if (raw[peOffset] !== 0x50 || raw[peOffset + 1] !== 0x45) {
+    return pe
+  }
 
-  const machine = readU16LE(raw, coffStart)
-  const numberOfSections = readU16LE(raw, coffStart + 2)
-  const timeDateStamp = readU32LE(raw, coffStart + 4)
-  const sizeOfOptionalHeader = readU16LE(raw, coffStart + 16)
-  const characteristics = readU16LE(raw, coffStart + 18)
+  pe.is_valid_pe = true
 
-  pe.is_dll = !!(characteristics & 0x2000)
+  const coffHeader = peOffset + 4
+  if (coffHeader + 20 > raw.length) return pe
 
+  const machine = readU16LE(raw, coffHeader)
   const machineTypes: Record<number, string> = {
-    0x0: 'Unknown', 0x14C: 'x86 (32-bit)', 0x8664: 'x64 (64-bit)',
-    0x1C0: 'ARM', 0xAA64: 'ARM64', 0x200: 'IA-64',
+    0x0: 'Unknown',
+    0x14C: 'x86 (32-bit)',
+    0x8664: 'x64 (64-bit)',
+    0x1C0: 'ARM',
+    0xAA64: 'ARM64',
   }
-  pe.machine_type = machineTypes[machine] || `0x${machine.toString(16)}`
-  pe.is_64bit = machine === 0x8664 || machine === 0xAA64
+  pe.machine_type = machineTypes[machine] || `Unknown (0x${machine.toString(16)})`
 
-  if (timeDateStamp > 0) {
-    try {
-      pe.compilation_time = new Date(timeDateStamp * 1000).toISOString()
-    } catch {
-      pe.compilation_time = 'Unknown'
-    }
-  }
+  const numberOfSections = readU16LE(raw, coffHeader + 2)
+  const sizeOfOptionalHeader = readU16LE(raw, coffHeader + 16)
 
-  // === Optional Header ===
-  const optStart = coffStart + 20
-  if (optStart + 2 > raw.length) return pe
+  // Optional Header
+  const optHeader = coffHeader + 20
+  if (optHeader + 2 > raw.length) return pe
 
-  const optMagic = readU16LE(raw, optStart)
-  pe.is_64bit = optMagic === 0x20B
+  const magic = readU16LE(raw, optHeader)
+  const is64 = magic === 0x20B
 
-  const subsystems: Record<number, string> = {
-    1: 'Native', 2: 'Windows GUI', 3: 'Windows Console',
-    5: 'OS/2 CUI', 7: 'POSIX CUI', 9: 'Windows CE GUI',
-    10: 'EFI Application', 14: 'Xbox', 16: 'Windows Boot',
-  }
-
-  let entryPoint = 0
-  let imageBase = ''
-  let numberOfRvaAndSizes = 0
-  let dataDirectoryOffset = 0
-
-  if (pe.is_64bit) {
-    if (optStart + 112 > raw.length) return pe
-    pe.subsystem = subsystems[readU16LE(raw, optStart + 68)] || 'Unknown'
-    entryPoint = readU32LE(raw, optStart + 16)
-    imageBase = `0x${readBigUInt64LE(raw, optStart + 24).toString(16)}`
-    numberOfRvaAndSizes = readU32LE(raw, optStart + 108)
-    dataDirectoryOffset = optStart + 112
+  if (is64) {
+    pe.entry_point = readU32LE(raw, optHeader + 16)
+    pe.image_base = Number(raw.readBigUInt64LE(optHeader + 24))
   } else {
-    if (optStart + 96 > raw.length) return pe
-    pe.subsystem = subsystems[readU16LE(raw, optStart + 68)] || 'Unknown'
-    entryPoint = readU32LE(raw, optStart + 16)
-    imageBase = `0x${readU32LE(raw, optStart + 28).toString(16)}`
-    numberOfRvaAndSizes = readU32LE(raw, optStart + 92)
-    dataDirectoryOffset = optStart + 96
+    pe.entry_point = readU32LE(raw, optHeader + 16)
+    pe.image_base = readU32LE(raw, optHeader + 28)
   }
 
-  pe.entry_point = entryPoint
-  pe.image_base = imageBase
-  pe.is_gui = pe.subsystem.includes('GUI')
-
-  // Linker version
-  if (optStart + 3 <= raw.length) {
-    pe.linker_version = `${raw[optStart + 2]}.${raw[optStart + 3]}`
+  // Subsystem
+  const subsystemOffset = optHeader + 68
+  if (subsystemOffset + 2 <= raw.length) {
+    const subsystem = readU16LE(raw, subsystemOffset)
+    const subsystems: Record<number, string> = {
+      1: 'Native',
+      2: 'Windows GUI',
+      3: 'Windows Console (CLI)',
+      5: 'OS/2 Console',
+      7: 'POSIX Console',
+      9: 'Windows CE GUI',
+      10: 'EFI Application',
+      14: 'Xbox',
+    }
+    pe.subsystem = subsystems[subsystem] || `Unknown (${subsystem})`
   }
 
-  // === Data Directories ===
-  const dataDirs: { rva: number; size: number }[] = []
-  for (let i = 0; i < Math.min(numberOfRvaAndSizes, 16); i++) {
-    const off = dataDirectoryOffset + i * 8
-    if (off + 8 <= raw.length) {
-      dataDirs.push({ rva: readU32LE(raw, off), size: readU32LE(raw, off + 4) })
-    } else {
-      dataDirs.push({ rva: 0, size: 0 })
+  // Compile timestamp
+  const timeDateStamp = readU32LE(raw, coffHeader + 4)
+  if (timeDateStamp > 0) {
+    const date = new Date(timeDateStamp * 1000)
+    if (date.getFullYear() >= 1990 && date.getFullYear() <= new Date().getFullYear() + 1) {
+      pe.compile_time = date.toISOString()
     }
   }
 
-  pe.has_debug_info = dataDirs[6].rva > 0 && dataDirs[6].size > 0
+  // Data directories start offset
+  const dataDirStart = optHeader + (is64 ? 112 : 96)
 
-  // === RVA to File Offset helper ===
-  function rvaToOffset(rva: number): number {
-    for (const sec of pe.sections) {
-      if (rva >= sec.virtual_address && rva < sec.virtual_address + sec.virtual_size) {
-        return sec.raw_offset + (rva - sec.virtual_address)
-      }
-    }
-    return -1
+  // Number of RVA and sizes
+  const numberOfRvaAndSizes = readU32LE(raw, dataDirStart - 4)
+
+  // Import directory RVA (index 1)
+  let importRva = 0
+  let importSize = 0
+  if (numberOfRvaAndSizes > 1 && dataDirStart + 16 <= raw.length) {
+    importRva = readU32LE(raw, dataDirStart + 8)
+    importSize = readU32LE(raw, dataDirStart + 12)
   }
 
-  // === Parse Sections ===
-  const sectionTableStart = optStart + sizeOfOptionalHeader
-
-  const suspiciousSectionNames = [
-    '.UPX0', '.UPX1', '.UPX2', '.aspack', '.adata', '.enigma1', '.enigma2',
-    '.vmp0', '.vmp1', '.vmp2', '.themida', '.mpress1', '.mpress2',
-    '.perplex', '.shrink1', '.shrink2', '.petite', '.nsp0', '.nsp1', '.nsp2',
-    '.yp', '.DAV', '.PELOCK', '.PESpin',
-  ]
-
-  const packerSectionSignatures: Record<string, string> = {
-    '.upx0': 'UPX Packer', '.upx1': 'UPX Packer', '.upx2': 'UPX Packer',
-    '.aspack': 'ASPack Packer', '.adata': 'Advanced Packer (Enigma/Themida)',
-    '.enigma1': 'Enigma Protector', '.enigma2': 'Enigma Protector',
-    '.vmp0': 'VMProtect', '.vmp1': 'VMProtect', '.vmp2': 'VMProtect',
-    '.themida': 'Themida', '.mpress1': 'MPRESS', '.mpress2': 'MPRESS',
-    '.perplex': 'Perplex PE-Protector', '.petite': 'Petite Packer',
-    '.nsp0': 'NsPack', '.nsp1': 'NsPack', '.nsp2': 'NsPack',
-    '.pelsp1': 'PELock', '.pespin': 'PESpin',
+  // Export directory RVA (index 0)
+  let exportRva = 0
+  let exportSize = 0
+  if (numberOfRvaAndSizes > 0 && dataDirStart + 8 <= raw.length) {
+    exportRva = readU32LE(raw, dataDirStart)
+    exportSize = readU32LE(raw, dataDirStart + 4)
   }
 
-  for (let i = 0; i < numberOfSections; i++) {
-    const secOff = sectionTableStart + i * 40
+  // Resource directory RVA (index 2)
+  let resourceRva = 0
+  let resourceSize = 0
+  if (numberOfRvaAndSizes > 2 && dataDirStart + 24 <= raw.length) {
+    resourceRva = readU32LE(raw, dataDirStart + 16)
+    resourceSize = readU32LE(raw, dataDirStart + 20)
+  }
+
+  // Sections
+  const sectionTableStart = optHeader + sizeOfOptionalHeader
+  const MAX_SECTIONS = Math.min(numberOfSections, 96)
+
+  for (let i = 0; i < MAX_SECTIONS; i++) {
+    const secOff = sectionTableStart + (i * 40)
     if (secOff + 40 > raw.length) break
 
-    const name = readAscii(raw, secOff, 8)
+    const name = readAsciiString(raw, secOff, 8)
     const virtualSize = readU32LE(raw, secOff + 8)
     const virtualAddress = readU32LE(raw, secOff + 12)
     const rawSize = readU32LE(raw, secOff + 16)
     const rawOffset = readU32LE(raw, secOff + 20)
-    const secChars = readU32LE(raw, secOff + 36)
+    const characteristics = readU32LE(raw, secOff + 36)
 
-    const isExecutable = !!(secChars & 0x20000000)
-    const isReadable = !!(secChars & 0x40000000)
-    const isWritable = !!(secChars & 0x80000000)
+    // Calculate entropy for this section
+    const secData = raw.slice(rawOffset, rawOffset + Math.min(rawSize, raw.length - rawOffset))
+    const entropy = calculateEntropy(secData)
 
-    let entropy = 0
-    const actualRaw = Math.min(rawSize, raw.length - rawOffset)
-    if (actualRaw > 0 && rawOffset < raw.length) {
-      entropy = calculateBufferEntropy(raw.slice(rawOffset, rawOffset + actualRaw))
-    }
-
-    let entropyFlag: 'normal' | 'packed' | 'encrypted' = 'normal'
-    if (entropy > 7.0) entropyFlag = 'encrypted'
-    else if (entropy > 6.5) entropyFlag = 'packed'
-
-    if (entropyFlag !== 'normal') {
-      pe.high_entropy_sections.push(name)
-    }
-
-    const lowerName = name.toLowerCase()
-    if (suspiciousSectionNames.includes(lowerName)) {
-      pe.suspicious_section_names.push(name)
-      const packer = packerSectionSignatures[lowerName]
-      if (packer && !pe.packer_detected.includes(packer)) {
-        pe.packer_detected.push(packer)
-      }
-    }
-
-    if (isWritable && isExecutable) {
-      pe.indicators.push(`Section "${name}" قابل للكتابة والتنفيذ (W^X violation)`)
-    }
+    const flags: string[] = []
+    if (characteristics & 0x00000020) flags.push('CODE')
+    if (characteristics & 0x00000040) flags.push('INITIALIZED_DATA')
+    if (characteristics & 0x00000080) flags.push('UNINITIALIZED_DATA')
+    if (characteristics & 0x20000000) flags.push('EXECUTE')
+    if (characteristics & 0x40000000) flags.push('READ')
+    if (characteristics & 0x80000000) flags.push('WRITE')
 
     pe.sections.push({
       name,
+      virtual_size: virtualSize,
       virtual_address: virtualAddress,
       raw_offset: rawOffset,
-      virtual_size: virtualSize,
       raw_size: rawSize,
-      entropy: Math.round(entropy * 100) / 100,
-      characteristics: secChars,
-      is_executable: isExecutable,
-      is_readable: isReadable,
-      is_writable: isWritable,
-      entropy_flag: entropyFlag,
+      characteristics,
+      entropy,
+      flags,
     })
   }
 
-  if (pe.sections.length > 0) {
-    pe.section_entropy_avg = Math.round(
-      (pe.sections.reduce((s, sec) => s + sec.entropy, 0) / pe.sections.length) * 100
-    ) / 100
-  }
-
-  // === Overlay ===
-  if (pe.sections.length > 0) {
-    const lastSection = pe.sections[pe.sections.length - 1]
-    const overlayStart = lastSection.raw_offset + lastSection.raw_size
-    if (overlayStart < raw.length) {
-      pe.overlay_size = raw.length - overlayStart
-      pe.overlay_flag = true
-      if (pe.overlay_size > 100 * 1024) {
-        pe.indicators.push(`Overlay كبير (${(pe.overlay_size / 1024).toFixed(0)} KB) - قد يحتوي حمولة`)
+  // Check entry point location
+  const entrySection = pe.sections.find(
+    (sec) => pe.entry_point >= sec.virtual_address && pe.entry_point < sec.virtual_address + sec.virtual_size
+  )
+  if (entrySection) {
+    const entryRVA = pe.entry_point - entrySection.virtual_address
+    const entryOffset = rvaToOffset(pe.entry_point, pe.sections)
+    if (entryOffset > 0 && entryOffset < raw.length) {
+      const entryBytes = raw.slice(entryOffset, Math.min(entryOffset + 16, raw.length))
+      const entryHex = entryBytes.toString('hex')
+      // Common pushad/mov patterns (packer signatures)
+      if (entryHex.startsWith('60') || entryHex.startsWith('fc68') || entryHex.startsWith('e8') || entryHex.startsWith('bbe8')) {
+        if (entrySection.entropy > 7.0) {
+          pe.detected_packer.push('Possible entry point obfuscation')
+        }
       }
     }
   }
 
-  // === Imports ===
-  if (dataDirs[1].rva > 0 && dataDirs[1].size > 0) {
-    const importOffset = rvaToOffset(dataDirs[1].rva)
-    if (importOffset > 0 && importOffset + 20 <= raw.length) {
-      let descOff = importOffset
-      let count = 0
+  // Parse imports
+  if (importRva > 0 && importSize > 0) {
+    const importOffset = rvaToOffset(importRva, pe.sections)
+    if (importOffset > 0 && importOffset < raw.length) {
+      for (let i = 0; i < 500; i++) {
+        const descOff = importOffset + (i * 20)
+        if (descOff + 20 > raw.length) break
 
-      while (descOff + 20 <= raw.length && count < 200) {
-        const iltRVA = readU32LE(raw, descOff)
-        const nameRVA = readU32LE(raw, descOff + 12)
-        const iatRVA = readU32LE(raw, descOff + 16)
+        const iltRva = readU32LE(raw, descOff)
+        const nameRva = readU32LE(raw, descOff + 12)
 
-        if (nameRVA === 0 && iltRVA === 0 && iatRVA === 0) break
+        if (iltRva === 0 && nameRva === 0) break
 
-        const nameOffset = rvaToOffset(nameRVA)
-        if (nameOffset > 0 && nameOffset < raw.length) {
-          const dllName = readAscii(raw, nameOffset, 256)
+        const dllOffset = rvaToOffset(nameRva, pe.sections)
+        if (dllOffset > 0 && dllOffset < raw.length) {
+          const dllName = readAsciiString(raw, dllOffset, 256)
+          if (!dllName) continue
+
           const functions: string[] = []
+          const iltOffset = rvaToOffset(iltRva, pe.sections)
+          if (iltOffset > 0) {
+            for (let j = 0; j < 200; j++) {
+              const funcEntryOff = iltOffset + (j * (is64 ? 8 : 4))
+              if (funcEntryOff + (is64 ? 8 : 4) > raw.length) break
 
-          const thunkRVA = iltRVA > 0 ? iltRVA : iatRVA
-          let thunkOff = rvaToOffset(thunkRVA)
-
-          if (thunkOff > 0) {
-            let funcCount = 0
-            while (thunkOff + (pe.is_64bit ? 8 : 4) <= raw.length && funcCount < 500) {
-              if (pe.is_64bit) {
-                const thunk = readBigUInt64LE(raw, thunkOff)
-                if (thunk === 0n) break
-                if (thunk & 0x8000000000000000n) {
-                  functions.push(`Ordinal #${Number(thunk & 0xFFFFn)}`)
+              if (is64) {
+                const entry = raw.readBigUInt64LE(funcEntryOff)
+                if (entry === BigInt(0)) break
+                if (entry & BigInt(1)) {
+                  const ordinal = Number(entry >> BigInt(32))
+                  functions.push(`Ordinal#${ordinal}`)
                 } else {
-                  const hintOff = rvaToOffset(Number(thunk))
-                  if (hintOff > 0 && hintOff + 2 < raw.length) {
-                    const funcName = readAscii(raw, hintOff + 2, 256)
+                  const hintRva = Number(entry)
+                  const hintOffset = rvaToOffset(hintRva, pe.sections)
+                  if (hintOffset > 0 && hintOffset + 2 < raw.length) {
+                    const funcName = readAsciiString(raw, hintOffset + 2, 256)
                     if (funcName) functions.push(funcName)
                   }
                 }
-                thunkOff += 8
               } else {
-                const thunk = readU32LE(raw, thunkOff)
-                if (thunk === 0) break
-                if (thunk & 0x80000000) {
-                  functions.push(`Ordinal #${thunk & 0xFFFF}`)
+                const entry = readU32LE(raw, funcEntryOff)
+                if (entry === 0) break
+                if (entry & 1) {
+                  functions.push(`Ordinal#${entry >> 16}`)
                 } else {
-                  const hintOff = rvaToOffset(thunk)
-                  if (hintOff > 0 && hintOff + 2 < raw.length) {
-                    const funcName = readAscii(raw, hintOff + 2, 256)
+                  const hintOffset = rvaToOffset(entry, pe.sections)
+                  if (hintOffset > 0 && hintOffset + 2 < raw.length) {
+                    const funcName = readAsciiString(raw, hintOffset + 2, 256)
                     if (funcName) functions.push(funcName)
                   }
                 }
-                thunkOff += 4
               }
-              funcCount++
             }
           }
 
           pe.imports.push({ dll: dllName.toLowerCase(), functions })
         }
-
-        descOff += 20
-        count++
       }
     }
   }
 
-  // === Resources ===
-  if (dataDirs[2].rva > 0 && dataDirs[2].size > 0) {
-    const resOffset = rvaToOffset(dataDirs[2].rva)
-    if (resOffset > 0 && resOffset + 16 <= raw.length) {
-      try {
-        const resData = parseResourceDirectory(raw, resOffset, rvaToOffset)
-        pe.resources = resData
-
-        const manifestRes = resData.find(r => r.type === 'RT_MANIFEST')
-        if (manifestRes) {
-          pe.has_manifest = true
-          const manifestOff = rvaToOffset(parseInt(manifestRes.name.split(' ').pop() || '0', 16) || 0)
-          if (manifestOff > 0 && manifestOff < raw.length) {
-            const size = Math.min(manifestRes.size || 4096, raw.length - manifestOff, 65536)
-            pe.manifest_content = raw.slice(manifestOff, manifestOff + size).toString('utf-8').replace(/\x00/g, '').trim()
-          }
-        }
-      } catch {
-        // ignore resource parse errors
-      }
-    }
-  }
-
-  // === Exports ===
-  if (dataDirs[0].rva > 0 && dataDirs[0].size > 0) {
-    const exportOffset = rvaToOffset(dataDirs[0].rva)
+  // Parse exports
+  if (exportRva > 0 && exportSize > 0) {
+    const exportOffset = rvaToOffset(exportRva, pe.sections)
     if (exportOffset > 0 && exportOffset + 40 <= raw.length) {
-      const numberOfNames = readU32LE(raw, exportOffset + 24)
-      const addressOfNames = readU32LE(raw, exportOffset + 32)
-      const namesOff = rvaToOffset(addressOfNames)
-      if (namesOff > 0) {
-        for (let i = 0; i < Math.min(numberOfNames, 100); i++) {
-          const namePtr = readU32LE(raw, namesOff + i * 4)
-          const nameOff = rvaToOffset(namePtr)
-          if (nameOff > 0 && nameOff < raw.length) {
-            const name = readAscii(raw, nameOff, 256)
+      const numFunctions = readU32LE(raw, exportOffset + 20)
+      const numNames = readU32LE(raw, exportOffset + 24)
+      const namesRva = readU32LE(raw, exportOffset + 32)
+
+      const namesOffset = rvaToOffset(namesRva, pe.sections)
+      if (namesOffset > 0) {
+        const maxNames = Math.min(numNames, 500)
+        for (let i = 0; i < maxNames; i++) {
+          const namePtrOff = namesOffset + (i * 4)
+          if (namePtrOff + 4 > raw.length) break
+          const nameRva = readU32LE(raw, namePtrOff)
+          const nameOffset = rvaToOffset(nameRva, pe.sections)
+          if (nameOffset > 0 && nameOffset < raw.length) {
+            const name = readAsciiString(raw, nameOffset, 256)
             if (name) pe.exports.push(name)
           }
         }
@@ -527,851 +475,769 @@ function parsePE(raw: Buffer): PEInfo {
     }
   }
 
-  // === كشف Packers من السلاسل النصية ===
-  const allStrings = extractBinaryStrings(raw)
-  const stringSet = new Set(allStrings.map(s => s.toLowerCase()))
-
-  const packerStringSignatures: Record<string, string> = {
-    'upx!': 'UPX Packer', 'upx0': 'UPX Packer', 'upx1': 'UPX Packer',
-    'themida': 'Themida Protector', 'winlicense': 'Themida/WinLicense',
-    'vmprotect': 'VMProtect', 'vmp0': 'VMProtect',
-    'aspack': 'ASPack', 'pec2': 'PECompact2',
-    'nsp0': 'NsPack', 'mpress': 'MPRESS',
-    'obsidium': 'Obsidium', 'enigma': 'Enigma Protector',
-    'petite': 'Petite', 'shrinker': 'Shrinker',
-    'pelock': 'PELock', 'pespin': 'PESpin',
-    'code virtualizer': 'Code Virtualizer',
-    'smart assembly': 'SmartAssembly',
-    '.net reactor': '.NET Reactor',
-    'dotfuscator': 'Dotfuscator',
-    'confuserex': 'ConfuserEx',
+  // Detect packers
+  const packerSignatures: Record<string, { sectionNames: string[]; check: (pe: PEInfo) => boolean }> = {
+    'UPX': {
+      sectionNames: ['UPX0', 'UPX1', 'UPX2'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('UPX')),
+    },
+    'Themida/WinLicense': {
+      sectionNames: ['.themida'],
+      check: (pe) => pe.sections.some((s) => s.name.includes('themida') || s.name.includes('.vmp')),
+    },
+    'VMProtect': {
+      sectionNames: ['.vmp0', '.vmp1'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('.vmp')),
+    },
+    'ASPack': {
+      sectionNames: ['.aspack'],
+      check: (pe) => pe.sections.some((s) => s.name.includes('aspack')),
+    },
+    'PECompact': {
+      sectionNames: ['.pec'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('.pec')),
+    },
+    'MPRESS': {
+      sectionNames: ['.MPRESS1', '.MPRESS2'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('.MPRESS')),
+    },
+    'Armadillo': {
+      sectionNames: ['.adata'],
+      check: (pe) => pe.imports.some((imp) => imp.dll.includes('arm')),
+    },
+    'Enigma Protector': {
+      sectionNames: ['.enigma1', '.enigma2'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('.enigma')),
+    },
+    'Obsidium': {
+      sectionNames: ['.obsidium'],
+      check: (pe) => pe.sections.some((s) => s.name.includes('obsidium')),
+    },
+    'PEtite': {
+      sectionNames: ['.petite'],
+      check: (pe) => pe.sections.some((s) => s.name.includes('petite')),
+    },
+    'NSPack': {
+      sectionNames: ['.nsp0', '.nsp1'],
+      check: (pe) => pe.sections.some((s) => s.name.startsWith('.nsp')),
+    },
   }
 
-  for (const [key, packer] of Object.entries(packerStringSignatures)) {
-    if (stringSet.has(key) && !pe.packer_detected.includes(packer)) {
-      pe.packer_detected.push(packer)
+  for (const [packerName, sig] of Object.entries(packerSignatures)) {
+    if (sig.check(pe)) {
+      pe.detected_packer.push(packerName)
     }
   }
 
-  // لا يوجد imports = مشبوه
-  let totalImports = 0
-  for (const imp of pe.imports) totalImports += imp.functions.length
-  if (pe.is_pe && totalImports === 0) {
-    pe.indicators.push('لا يوجد استيرادات - قد يكون ملفوف أو يحلل APIs ديناميكياً')
+  // High entropy sections without packer name -> possible custom packer
+  const highEntropySections = pe.sections.filter((s) => s.entropy > 7.5 && !s.name.startsWith('.text'))
+  if (highEntropySections.length > 0 && pe.detected_packer.length === 0) {
+    pe.detected_packer.push('Possible custom encryption/packing')
   }
 
-  // Entry Point في section غير .text
-  if (pe.sections.length > 0 && entryPoint > 0) {
-    for (const sec of pe.sections) {
-      const secEnd = sec.virtual_address + sec.virtual_size
-      if (entryPoint >= sec.virtual_address && entryPoint < secEnd) {
-        if (!sec.name.startsWith('.text') && sec.name !== '.textbss') {
-          pe.indicators.push(`Entry Point في section "${sec.name}" بدل .text - قد يكون ملفوف`)
-        }
-        break
+  // Parse resources (basic)
+  if (resourceRva > 0 && resourceSize > 0) {
+    const resOffset = rvaToOffset(resourceRva, pe.sections)
+    if (resOffset > 0 && resOffset < raw.length) {
+      const resourceTypes: Record<number, string> = {
+        1: 'Cursor',
+        2: 'Bitmap',
+        3: 'Icon',
+        4: 'Menu',
+        5: 'Dialog',
+        6: 'String Table',
+        7: 'Font Directory',
+        8: 'Font',
+        9: 'Accelerator',
+        10: 'RC Data',
+        11: 'Message Table',
+        12: 'Group Cursor',
+        14: 'Group Icon',
+        16: 'Version Info',
+        24: 'Manifest',
       }
-    }
-  }
 
-  // .NET
-  if (dataDirs[14] && dataDirs[14].rva > 0 && dataDirs[14].size > 0) {
-    pe.indicators.push('.NET Assembly')
-  }
-
-  pe.scan_time = Math.round(performance.now() - startTime)
-  return pe
-}
-
-// ===================================================================
-// Resource Directory Parser
-// ===================================================================
-
-function parseResourceDirectory(raw: Buffer, offset: number, rvaToOffset: (rva: number) => number): PEResource[] {
-  const resources: PEResource[] = []
-  if (offset + 16 > raw.length) return resources
-
-  const numberOfNamedEntries = readU16LE(raw, offset + 12)
-  const numberOfIdEntries = readU16LE(raw, offset + 14)
-  const totalEntries = numberOfNamedEntries + numberOfIdEntries
-
-  const typeNames: Record<number, string> = {
-    1: 'RT_CURSOR', 2: 'RT_BITMAP', 3: 'RT_ICON', 4: 'RT_MENU',
-    5: 'RT_DIALOG', 6: 'RT_STRING', 7: 'RT_FONTDIR', 8: 'RT_FONT',
-    9: 'RT_ACCELERATOR', 10: 'RT_RCDATA', 11: 'RT_MESSAGETABLE',
-    12: 'RT_GROUP_CURSOR', 14: 'RT_GROUP_ICON', 16: 'RT_VERSION',
-    24: 'RT_MANIFEST',
-  }
-
-  for (let i = 0; i < Math.min(totalEntries, 100); i++) {
-    const entryOff = offset + 16 + i * 8
-    if (entryOff + 8 > raw.length) break
-
-    const nameOrId = readU32LE(raw, entryOff)
-    const dataOrSubdir = readU32LE(raw, entryOff + 4)
-
-    const isDir = !!(dataOrSubdir & 0x80000000)
-    const isNamed = !!(nameOrId & 0x80000000)
-
-    let entryName = ''
-    if (!isNamed) {
-      const id = nameOrId & 0xFFFF
-      entryName = typeNames[id] || `ID_${id}`
-    } else {
-      entryName = `Named_${i}`
-    }
-
-    if (isDir) {
-      const subDirOffset = dataOrSubdir & 0x7FFFFFFF
       try {
-        const subResources = parseResourceDirectory(raw, subDirOffset, rvaToOffset)
-        for (const sub of subResources) {
-          if (sub.type.startsWith('ID_') || sub.type.startsWith('Named_')) {
-            resources.push({ ...sub, type: entryName })
-          } else {
-            resources.push({ ...sub, type: `${entryName} / ${sub.type}` })
+        // Parse resource directory (simplified)
+        const numNamedTypes = readU16LE(raw, resOffset + 12)
+        const numIdTypes = readU16LE(raw, resOffset + 14)
+        const totalTypes = numNamedTypes + numIdTypes
+
+        for (let i = 0; i < Math.min(totalTypes, 32); i++) {
+          const entryOff = resOffset + 16 + (i * 8)
+          if (entryOff + 8 > raw.length) break
+
+          const typeID = readU32LE(raw, entryOff)
+          const typeStr = resourceTypes[typeID] || `Type#${typeID}`
+
+          // Skip complex nesting - just note the type exists
+          if (!pe.resources.some((r) => r.type === typeStr)) {
+            pe.resources.push({ type: typeStr, name: 'Embedded', language: 'Neutral', size: 0 })
           }
         }
       } catch {
-        // skip
-      }
-    } else {
-      if (dataOrSubdir + 16 <= raw.length) {
-        const resRVA = readU32LE(raw, dataOrSubdir)
-        const resSize = readU32LE(raw, dataOrSubdir + 4)
-        resources.push({
-          type: entryName,
-          name: `RVA: 0x${resRVA.toString(16)}`,
-          size: resSize,
-        })
+        // Resource parsing is best-effort
       }
     }
   }
 
-  return resources
+  pe.scan_time = Date.now() - startTime
+  return pe
 }
 
-// ===================================================================
-// محرك تحليل السلاسل الثنائية
-// ===================================================================
+// ============================================================
+// Binary String Engine (for EXE files)
+// ============================================================
 
-function binaryStringEngine(raw: Buffer): {
-  threats: string[]
-  capabilities: string[]
-  patterns: { pattern: string; description: string; severity: 'danger' | 'warning' | 'info' }[]
-  urls: string[]
-  ports: number[]
-} {
-  const strings = extractBinaryStrings(raw)
-  const stringSet = new Set(strings.map(s => s.toLowerCase()))
-  const threats: string[] = []
-  const capabilities: string[] = []
-  const patterns: { pattern: string; description: string; severity: 'danger' | 'warning' | 'info' }[] = []
-  const urls: string[] = []
-  const foundPorts = new Set<number>()
+function binaryStringEngine(buf: Buffer): PatternMatch[] {
+  const matches: PatternMatch[] = []
+  const strings = extractStringsFromBuffer(buf, 5)
 
-  const rules: { keywords: string[]; threat: string; severity: 'danger' | 'warning'; desc: string; cap: string }[] = [
-    { keywords: ['cmd.exe', '/c ', '/k ', 'powershell', 'rundll32', 'regsvr32', 'mshta', 'wscript'], threat: 'cmd_exec', severity: 'danger', desc: 'استدعاء أوامر النظام', cap: 'تنفيذ أوامر النظام' },
-    { keywords: ['ws2_32', 'wsock32', 'wininet', 'winhttp', 'urlmon', 'internetopen', 'internetconnect', 'wsastartup'], threat: 'network_activity', severity: 'danger', desc: 'واجهات شبكة', cap: 'اتصال شبكة' },
-    { keywords: ['getasynckeystate', 'setwindowshookex', 'getforegroundwindow', 'keybd_event', 'wh_keyboard'], threat: 'keylogger', severity: 'danger', desc: 'Keylogger', cap: 'تسجيل لوحة المفاتيح' },
-    { keywords: ['bitblt', 'getdc', 'createdc', 'gdi32', 'stretchblt', 'getdesktopwindow'], threat: 'screen_capture', severity: 'danger', desc: 'لقطة شاشة', cap: 'التقاط لقطات الشاشة' },
-    { keywords: ['regopenkey', 'regsetvalue', 'regcreatekey', 'hkcu\\', 'hklm\\', 'currentversion\\run'], threat: 'registry', severity: 'danger', desc: 'تعديل الريجستري', cap: 'تعديل الريجستري' },
-    { keywords: ['startup', 'shell:startup', 'appdata\\roaming', 'appdata\\local'], threat: 'persistence', severity: 'warning', desc: 'تشغيل تلقائي', cap: 'تشغيل تلقائي' },
-    { keywords: ['discord', 'discord.com', 'webhook', 'appdata\\discord', 'discord_canary'], threat: 'discord_stealer', severity: 'danger', desc: 'مؤشرات ديسكورد', cap: 'سرقة توكنات ديسكورد' },
-    { keywords: ['chrome', 'firefox', 'brave', 'opera', 'login?data', 'cookies', 'sqlite'], threat: 'browser_steal', severity: 'danger', desc: 'سرقة بيانات المتصفح', cap: 'سرقة بيانات المتصفح' },
-    { keywords: ['isdebuggerpresent', 'ntqueryinformationprocess', 'outputdebugstring'], threat: 'anti_debug', severity: 'warning', desc: 'anti-debug', cap: 'مقاومة التصحيح' },
-    { keywords: ['vmware', 'virtualbox', 'vbox', 'qemu', 'sandboxie'], threat: 'anti_vm', severity: 'warning', desc: 'anti-VM', cap: 'مقاومة الافترائي' },
-    { keywords: ['telegram', 'tdata', 'tdesktop'], threat: 'telegram_steal', severity: 'danger', desc: 'سرقة تيليجرام', cap: 'سرقة تيليجرام' },
-    { keywords: ['crypto', 'wallet', 'bitcoin', 'ethereum', 'metamask'], threat: 'crypto_steal', severity: 'danger', desc: 'سرقة محافظ كريبتو', cap: 'سرقة محافظ رقمية' },
-    { keywords: ['steam', 'epic games', 'uplay', 'riot client'], threat: 'game_steal', severity: 'warning', desc: 'سرقة حسابات ألعاب', cap: 'سرقة حسابات الألعاب' },
-    { keywords: ['filezilla', 'winscp', 'ssh', 'sftp', 'ftp'], threat: 'ftp_steal', severity: 'warning', desc: 'سرقة بيانات FTP', cap: 'سرقة بيانات FTP/SSH' },
-    { keywords: ['showwindow', 'sw_hide', 'setwindowpos'], threat: 'process_hide', severity: 'warning', desc: 'إخفاء العملية', cap: 'إخفاء العملية' },
-    { keywords: ['taskmgr', 'terminateprocess'], threat: 'process_kill', severity: 'danger', desc: 'قتل عمليات', cap: 'قتل عمليات النظام' },
-    { keywords: ['inject', 'writeprocessmemory', 'virtualallocex', 'createremotethread'], threat: 'process_injection', severity: 'danger', desc: 'حقن في عمليات', cap: 'حقن عمليات' },
+  const suspiciousPatterns: { pattern: RegExp; desc: string; severity: number }[] = [
+    { pattern: /powershell/i, desc: 'PowerShell command execution detected', severity: 8 },
+    { pattern: /cmd\.exe|cmd \/c/i, desc: 'CMD shell execution detected', severity: 7 },
+    { pattern: /reg(?:istry|edit|svr32|add)/i, desc: 'Registry manipulation detected', severity: 7 },
+    { pattern: /svchost\.exe/i, desc: 'May masquerade as svchost.exe', severity: 6 },
+    { pattern: /temp[\\/]|%temp%|appdata/i, desc: 'Uses temporary or AppData directories', severity: 5 },
+    { pattern: /http[s]?:\/\/.*?\.(?:tk|ml|ga|cf|gq|pw|top)/i, desc: 'Connects to suspicious TLD domain', severity: 8 },
+    { pattern: /\/c\s+(?:curl|wget|Invoke-WebRequest|Start-BitsTransfer)/i, desc: 'Downloads files via command line', severity: 9 },
+    { pattern: /net\s+(?:user|localgroup|share|start|stop)/i, desc: 'Network/user configuration commands', severity: 6 },
+    { pattern: /taskkill|tasklist|wmic\s+process/i, desc: 'Process manipulation detected', severity: 7 },
+    { pattern: /bypass|block| AMSI/i, desc: 'AMSI bypass attempt detected', severity: 9 },
+    { pattern: /Set-MpPreference|Add-MpPreference|Disable-Windows/i, desc: 'Antivirus tampering detected', severity: 10 },
+    { pattern: /iex\b|invoke-expression|Start-Process/i, desc: 'Dynamic code execution detected', severity: 8 },
+    { pattern: /DownloadString|DownloadFile|WebClient/i, desc: 'Network download capability detected', severity: 7 },
+    { pattern: /crypt(?:protect|unprotect|32)/i, desc: 'Cryptographic API usage detected', severity: 6 },
+    { pattern: /key(?:board|log|stroke)/i, desc: 'Possible keylogger functionality', severity: 9 },
+    { pattern: /screen(?:capture|shot|grab|spy)/i, desc: 'Screen capture capability detected', severity: 9 },
+    { pattern: /bitcoin|wallet|crypto|mining/i, desc: 'Cryptocurrency-related activity detected', severity: 7 },
+    { pattern: /token|authorization|bearer/i, desc: 'Token/auth interception possible', severity: 6 },
+    { pattern: /discord(?:\.gg|app|api|webhook)/i, desc: 'Discord API/webhook usage detected', severity: 5 },
+    { pattern: /inject|hook|dll.*inject|loadlibrary/i, desc: 'Code injection capability detected', severity: 9 },
+    { pattern: /reverse.*shell|bind.*shell|backdoor/i, desc: 'Backdoor/remote shell detected', severity: 10 },
+    { pattern: /rat\.|remote.*access|teamviewer|anydesk/i, desc: 'Remote Access Trojan indicators detected', severity: 8 },
+    { pattern: /base64.*decode|frombase64|atob\b/i, desc: 'Base64 decoding detected', severity: 4 },
+    { pattern: /\\\\[?\\].*pipe/i, desc: 'Named pipe communication detected', severity: 6 },
+    { pattern: /screenshot|webcam|microphone|camera/i, desc: 'Spying capability detected', severity: 9 },
+    { pattern: /credential|password|login|passwd/i, desc: 'Credential harvesting indicators detected', severity: 8 },
+    { pattern: /chrome|firefox|browser.*data|cookie.*steal/i, desc: 'Browser data theft indicators', severity: 8 },
   ]
 
-  for (const rule of rules) {
-    for (const kw of rule.keywords) {
-      if (stringSet.has(kw)) {
-        threats.push(rule.threat)
-        patterns.push({ pattern: kw.toUpperCase(), description: rule.desc, severity: rule.severity })
-        capabilities.push(rule.cap)
-        break
+  for (const str of strings) {
+    for (const { pattern, desc, severity } of suspiciousPatterns) {
+      if (pattern.test(str)) {
+        if (!matches.some((m) => m.description === desc)) {
+          matches.push({
+            pattern: str.substring(0, 100),
+            type: severity >= 8 ? 'malicious' : severity >= 6 ? 'suspicious' : 'info',
+            description: desc,
+            severity,
+          })
+        }
       }
     }
   }
 
-  // URLs
-  const urlMatches = raw.toString('binary').match(/https?:\/\/[^\s\x00-\x1F\x80-\xFF]{5,150}/g) || []
-  const excludeDomains = ['microsoft.com', 'windows.com', 'github.com', 'mozilla.org', 'w3.org', 'google.com']
-  for (const url of urlMatches) {
-    if (!excludeDomains.some(d => url.toLowerCase().includes(d)) && url.length > 15) {
-      urls.push(url.substring(0, 100))
+  return matches.sort((a, b) => b.severity - a.severity)
+}
+
+// ============================================================
+// Obfuscation Detection Engine
+// ============================================================
+
+function detectObfuscation(content: string): ObfuscationReport {
+  const report: ObfuscationReport = {
+    is_obfuscated: false,
+    confidence: 0,
+    layers: 0,
+    techniques: [],
+    decoded_size: 0,
+    original_size: content.length,
+  }
+
+  let current = content
+  let layerCount = 0
+  const MAX_LAYERS = 8
+
+  for (let i = 0; i < MAX_LAYERS; i++) {
+    let decoded = ''
+    let found = false
+
+    // Base64 layer
+    const base64Match = current.match(/(?:["'`])([A-Za-z0-9+/]{20,}={0,2})(?:["'`])/)
+    if (base64Match) {
+      decoded = decodeBase64(base64Match[1])
+      if (decoded && decoded.length > 10 && /[\x20-\x7E]{10,}/.test(decoded)) {
+        current = decoded
+        layerCount++
+        if (!report.techniques.includes('Base64 Encoding')) {
+          report.techniques.push('Base64 Encoding')
+        }
+        found = true
+        continue
+      }
     }
-  }
-  if (urls.length > 0) {
-    threats.push('c2_urls')
-    patterns.push({ pattern: 'C2_URLS', description: `${urls.length} URLs مشبوهة`, severity: 'danger' })
-  }
 
-  // Ports
-  const knownBad = [4444, 5555, 6666, 7777, 8888, 9999, 31337, 1337, 6667]
-  for (const p of knownBad) {
-    if (stringSet.has(String(p))) foundPorts.add(p)
-  }
-
-  return {
-    threats: [...new Set(threats)],
-    capabilities: [...new Set(capabilities)],
-    patterns,
-    urls,
-    ports: Array.from(foundPorts),
-  }
-}
-
-// ===================================================================
-// محرك كشف التشفير والإبهام
-// ===================================================================
-
-function tryDecodeBase64(str: string): string | null {
-  try {
-    const cleaned = str.replace(/\s/g, '')
-    if (cleaned.length < 16 || cleaned.length % 4 !== 0) return null
-    if (!/^[A-Za-z0-9+/]+=*$/.test(cleaned)) return null
-    const decoded = Buffer.from(cleaned, 'base64').toString('utf-8')
-    if (decoded.length < 4) return null
-    const printableRatio = (decoded.match(/[\x20-\x7E\x0A\x0D\x09]/g) || []).length / decoded.length
-    if (printableRatio > 0.7) return decoded
-    return null
-  } catch {
-    return null
-  }
-}
-
-function tryDecodeHex(str: string): string | null {
-  try {
-    const cleaned = str.replace(/[^0-9a-fA-F]/g, '')
-    if (cleaned.length < 10 || cleaned.length % 2 !== 0) return null
-    const decoded = Buffer.from(cleaned, 'hex').toString('utf-8')
-    if (decoded.length < 3) return null
-    const printableRatio = (decoded.match(/[\x20-\x7E]/g) || []).length / decoded.length
-    if (printableRatio > 0.65) return decoded
-    return null
-  } catch {
-    return null
-  }
-}
-
-function detectObfuscation(content: string, _fileName: string): ObfuscationReport {
-  const methods: string[] = []
-  const layers: DecodedLayer[] = []
-  let currentContent = content
-
-  const base64Blocks = content.match(/[A-Za-z0-9+/]{40,}={0,2}/g) || []
-  const hexBlocks = content.match(/(?:\\x[0-9a-fA-F]{2}){10,}/g) || []
-  const unicodeBlocks = content.match(/(?:\\u[0-9a-fA-F]{4}){5,}/g) || []
-
-  if (base64Blocks.length >= 2) methods.push('Base64 Encoding')
-  if (hexBlocks.length >= 1) methods.push('Hex Encoding')
-  if (unicodeBlocks.length >= 1) methods.push('Unicode Encoding')
-  if (/eval\s*\(/.test(content) && base64Blocks.length > 0) methods.push('eval() Dynamic Execution')
-  if (/fromCharCode|charCodeAt/.test(content)) methods.push('CharCode Construction')
-  if (/String\.fromCharCode\s*\(\s*\d+\s*(?:,\s*\d+\s*){5,}/.test(content)) methods.push('String.fromCharCode Obfuscation')
-  if (/(?:Proxy|Reflect|atob|btoa)\s*\(/.test(content) && /constructor|prototype/.test(content)) methods.push('Prototype Chain Abuse')
-  if (/JSON\.parse\s*\(\s*(?:atob|btoa|Buffer\.from)/.test(content)) methods.push('JSON.parse + Encoding')
-  if (/UPX|packed|compress|decompress/i.test(content)) methods.push('Packed/Compressed Code')
-
-  const entropy = calculateStringEntropy(content)
-  if (entropy > 5.5) methods.push('High Entropy')
-
-  for (let layerNum = 1; layerNum <= 6; layerNum++) {
-    let decoded: string | null = null
-    let method = ''
-    decoded = tryDecodeBase64(currentContent)
-    if (decoded) { method = 'Base64' }
-    if (!decoded) { decoded = tryDecodeHex(currentContent); if (decoded) method = 'Hex' }
-    if (!decoded) break
-
-    layers.push({
-      layer: layerNum,
-      method,
-      preview: decoded.substring(0, 300),
-      fullContent: decoded,
-      patternsFound: (decoded.match(/eval|exec|spawn|function|require|import|fetch|http|socket|child_process/i) || []).length,
-    })
-    currentContent = decoded
-    if (decoded.length < 20) break
-  }
-
-  const isObfuscated = methods.length > 0 || layers.length > 0
-  let confidence = 0
-  if (layers.length >= 3) confidence = 95
-  else if (layers.length >= 2) confidence = 80
-  else if (layers.length === 1) confidence = 60
-  if (entropy > 5.5) confidence = Math.max(confidence, 70)
-  if (methods.length >= 3) confidence = Math.max(confidence, 75)
-  if (methods.length === 0) confidence = 0
-
-  return {
-    is_obfuscated: isObfuscated,
-    confidence,
-    methods,
-    layers,
-    total_layers_decoded: layers.length,
-    entropy_score: Math.round(entropy * 100) / 100,
-  }
-}
-
-// ===================================================================
-// محرك الأنماط (للكود المصدر)
-// ===================================================================
-
-const DANGEROUS_PATTERNS = [
-  { pattern: /child_process\.(exec|spawn|execSync|spawnSync)/, desc: 'تنفيذ أوامر النظام', severity: 'danger' as const, category: 'cmd_exec' },
-  { pattern: /powershell|cmd\.exe|\/bin\/sh|\/bin\/bash/i, desc: 'استدعاء shell', severity: 'danger' as const, category: 'cmd_exec' },
-  { pattern: /GetAsyncKeyState|SetWindowsHookEx|keyboard.*hook/i, desc: 'Keylogger', severity: 'danger' as const, category: 'keylogger' },
-  { pattern: /GetDesktopWindow|BitBlt|copyFromScreen/i, desc: 'لقطة شاشة', severity: 'danger' as const, category: 'screen_capture' },
-  { pattern: /reverse.*shell|backdoor|rat.*remote|C2\s*server/i, desc: 'باك دور', severity: 'danger' as const, category: 'rat' },
-  { pattern: /\.encrypt\s*\(|ransomware/i, desc: 'تشفير ملفات', severity: 'danger' as const, category: 'ransomware' },
-  { pattern: /eval\s*\(\s*(atob|btoa|Buffer\.from)/i, desc: 'eval + base64', severity: 'danger' as const, category: 'code_injection' },
-  { pattern: /HKLM|HKCU|reg\s+add/i, desc: 'تعديل الريجستري', severity: 'danger' as const, category: 'registry' },
-  { pattern: /TerminateProcess|Process\.kill/i, desc: 'قتل عمليات', severity: 'danger' as const, category: 'process_kill' },
-  { pattern: /startup|autorun|runonce|shell:startup/i, desc: 'تشغيل تلقائي', severity: 'warning' as const, category: 'persistence' },
-  { pattern: /isDebuggerPresent|debugger/i, desc: 'anti-debug', severity: 'warning' as const, category: 'anti_debug' },
-  { pattern: /vmware|virtualbox|vbox|qemu/i, desc: 'anti-VM', severity: 'warning' as const, category: 'anti_vm' },
-  { pattern: /clipboard.*read|Clipboard.*GetData/i, desc: 'سرقة الحافظة', severity: 'warning' as const, category: 'clipboard' },
-  { pattern: /pastebin\.com\/raw|api\.telegram\.org\/bot/i, desc: 'تسريب بيانات', severity: 'danger' as const, category: 'data_exfil' },
-  { pattern: /discord\.com\/api\/v\d+\/users\/@me/i, desc: 'استخراج بيانات ديسكورد', severity: 'warning' as const, category: 'discord_token' },
-  { pattern: /localStorage\.getItem\(.*token/i, desc: 'سرقة توكن', severity: 'danger' as const, category: 'discord_token' },
-  { pattern: /document\.cookie.*token/i, desc: 'سرقة توكن من الكوكيز', severity: 'danger' as const, category: 'discord_token' },
-  { pattern: /fs\.readFileSync|readFile.*cookie|readdir.*discord/i, desc: 'قراءة ملفات حساسة', severity: 'danger' as const, category: 'data_exfil' },
-  { pattern: /os\.homedir|os\.tmpdir|APPDATA/i, desc: 'مسارات حساسة', severity: 'warning' as const, category: 'data_exfil' },
-]
-
-const PORT_PATTERNS = [
-  /(?:connect|bind|listen|port|PORT)\s*[:=]\s*(\d{1,5})/g,
-  /(?:0\.0\.0\.0|127\.0\.0\.1|localhost)\s*:\s*(\d{1,5})/g,
-]
-
-const C2_PATTERNS = [
-  /https?:\/\/[^\s'"]+/g,
-  /(?:host|HOST|server|SERVER|url|URL)\s*[:=]\s*['"]([^'"]+)['"]/g,
-]
-
-function extractPorts(content: string): number[] {
-  const ports = new Set<number>()
-  const skip = new Set([80, 443, 3000, 8080, 4443, 8443, 53, 22])
-  for (const pattern of PORT_PATTERNS) {
-    const regex = new RegExp(pattern.source, pattern.flags)
-    let match
-    while ((match = regex.exec(content)) !== null) {
-      const port = parseInt(match[1])
-      if (port > 0 && port <= 65535 && !skip.has(port)) ports.add(port)
+    // Hex layer
+    const hexMatch = current.match(/(?:["'`])([0-9a-fA-F]{40,})(?:["'`])/)
+    if (hexMatch) {
+      decoded = decodeHex(hexMatch[1])
+      if (decoded && decoded.length > 10 && /[\x20-\x7E]{10,}/.test(decoded)) {
+        current = decoded
+        layerCount++
+        if (!report.techniques.includes('Hex Encoding')) {
+          report.techniques.push('Hex Encoding')
+        }
+        found = true
+        continue
+      }
     }
-  }
-  return Array.from(ports)
-}
 
-function extractC2Servers(content: string): string[] {
-  const servers = new Set<string>()
-  const exclude = ['localhost', '127.0.0.1', 'example.com', 'github.com', 'npmjs.com', 'pypi.org', 'microsoft.com', 'windows.com', 'vercel.com']
-  for (const pattern of C2_PATTERNS) {
-    const regex = new RegExp(pattern.source, pattern.flags)
-    let match
-    while ((match = regex.exec(content)) !== null) {
-      const url = (match[1] || match[0]).replace(/['"]/g, '').trim().substring(0, 200)
-      if (url && !exclude.some(d => url.includes(d))) servers.add(url)
+    // Unicode escape layer
+    if (/\\u[0-9a-fA-F]{4}/.test(current)) {
+      decoded = decodeUnicodeEscapes(current)
+      if (decoded !== current && decoded.length > 10) {
+        current = decoded
+        layerCount++
+        if (!report.techniques.includes('Unicode Escaping')) {
+          report.techniques.push('Unicode Escaping')
+        }
+        found = true
+        continue
+      }
     }
+
+    // ROT13 layer
+    if (/[a-zA-Z]/.test(current)) {
+      decoded = decodeROT13(current)
+      if (decoded !== current) {
+        const rot13Sensitivity = (decoded.match(/eval|exec|function|var |let |const |import |require|fetch|http|\.exe/i) || []).length
+        const origSensitivity = (current.match(/eval|exec|function|var |let |const |import |require|fetch|http|\.exe/i) || []).length
+        if (rot13Sensitivity > origSensitivity) {
+          current = decoded
+          layerCount++
+          if (!report.techniques.includes('ROT13 Cipher')) {
+            report.techniques.push('ROT13 Cipher')
+          }
+          found = true
+          continue
+        }
+      }
+    }
+
+    // XOR layer (common single-byte keys)
+    if (!found) {
+      for (let key = 1; key <= 255; key++) {
+        decoded = tryXORDecode(current, key)
+        if (decoded && decoded.length > 10) {
+          current = decoded
+          layerCount++
+          if (!report.techniques.includes('XOR Encryption')) {
+            report.techniques.push('XOR Encryption')
+          }
+          found = true
+          break
+        }
+      }
+    }
+
+    if (!found) break
   }
-  return Array.from(servers).slice(0, 15)
+
+  // Additional obfuscation indicators
+  const encodedCharRatio = (current.match(/\\x[0-9a-fA-F]{2}/g) || []).length / Math.max(current.length, 1)
+  if (encodedCharRatio > 0.3 && !report.techniques.includes('Hex Character Encoding')) {
+    report.techniques.push('Hex Character Encoding')
+  }
+
+  const unicodeEscapeRatio = (current.match(/\\u[0-9a-fA-F]{4}/g) || []).length / Math.max(current.length, 1)
+  if (unicodeEscapeRatio > 0.3 && !report.techniques.includes('Heavy Unicode Escaping')) {
+    report.techniques.push('Heavy Unicode Escaping')
+  }
+
+  // Check for common obfuscation patterns
+  if (/\beval\s*\(/.test(current)) report.techniques.push('eval() Dynamic Execution')
+  if (/\bFunction\s*\(/.test(current)) report.techniques.push('Function Constructor')
+  if (/atob\s*\(/.test(current) || /btoa\s*\(/.test(current)) report.techniques.push('Base64 Functions (atob/btoa)')
+  if (/\\x[0-9a-fA-F]{2}.+\\x[0-9a-fA-F]{2}.+\\x[0-9a-fA-F]{2}/.test(current)) {
+    if (!report.techniques.includes('Hex Character Encoding')) report.techniques.push('Hex Character Encoding')
+  }
+  if (/(?:\.\s*){3,}/.test(current)) report.techniques.push('String Concatenation Obfuscation')
+  if (/\[\s*['"][a-zA-Z]['"]\s*\]/.test(current)) report.techniques.push('Bracket Notation Obfuscation')
+
+  report.layers = layerCount
+  report.decoded_size = current.length
+  report.is_obfuscated = report.techniques.length > 0
+  report.confidence = Math.min(Math.round((report.techniques.length * 15) + (layerCount * 10)), 100)
+
+  return report
 }
 
-function patternEngineAnalyze(content: string, _fileName: string) {
-  const startTime = performance.now()
+// ============================================================
+// Pattern Engine (for source code / text files)
+// ============================================================
+
+function patternEngineAnalyze(content: string, obfuscation: ObfuscationReport): PatternMatch[] {
+  const matches: PatternMatch[] = []
+
+  const maliciousPatterns: { pattern: RegExp; desc: string; severity: number }[] = [
+    { pattern: /\beval\s*\(/, desc: 'Dynamic code execution via eval()', severity: 8 },
+    { pattern: /\bFunction\s*\(\s*['"`]/, desc: 'Function constructor abuse', severity: 8 },
+    { pattern: /\bexec\s*\(/, desc: 'System command execution', severity: 9 },
+    { pattern: /\bspawn\s*\(/, desc: 'Process spawning detected', severity: 7 },
+    { pattern: /\bchild_process\b/, desc: 'Child process module usage', severity: 7 },
+    { pattern: /\bfs\b\.\s*(?:read|write|unlink)/, desc: 'File system manipulation', severity: 6 },
+    { pattern: /\brequire\s*\(\s*['"`]child_process['"`]\s*\)/, desc: 'Requires child_process module', severity: 7 },
+    { pattern: /https?:\/\/.*?(?:discord\.gg|discord\.com\/api|discordapp\.com)/, desc: 'Discord webhook/API interaction', severity: 5 },
+    { pattern: /\bfetch\s*\(\s*['"`]https?:\/\//, desc: 'Outbound network request via fetch', severity: 5 },
+    { pattern: /\bXMLHttpRequest\b/, desc: 'XMLHttpRequest (network activity)', severity: 5 },
+    { pattern: /\bWebSocket\b/, desc: 'WebSocket connection detected', severity: 5 },
+    { pattern: /\blocalStorage\b|\bsessionStorage\b/, desc: 'Browser storage access', severity: 4 },
+    { pattern: /\bdocument\.cookie\b/, desc: 'Cookie access detected', severity: 6 },
+    { pattern: /\bnavigator\.clipboard\b|\bdocument\.execCommand\s*\(\s*['"`]copy['"`]\s*\)/, desc: 'Clipboard access', severity: 5 },
+    { pattern: /new\s+Image\(\)\.src\s*=|Image\s*\(\s*\)\s*\.\s*src/, desc: 'Image-based tracking/ping', severity: 5 },
+    { pattern: /\bwindow\.location\b\s*=|\blocation\.href\b\s*=|\blocation\.replace\b/, desc: 'URL redirection detected', severity: 6 },
+    { pattern: /\bwindow\.open\b/, desc: 'Popup window creation', severity: 4 },
+    { pattern: /\bself\.(?:remove|delete|destroy)/, desc: 'Self-destructive behavior', severity: 9 },
+    { pattern: /\bros[\\/](?:boot|startup|init|rc\.local)/, desc: 'Persistence mechanism (boot scripts)', severity: 9 },
+    { pattern: /\bcrontab|\bschtasks\b|\bat\s+\d{1,2}:\d{2}/, desc: 'Scheduled task/cron job', severity: 8 },
+    { pattern: /\bkeylog|key[\s_]*(?:stroke|capture|press|record|hook)/i, desc: 'Keylogger functionality', severity: 10 },
+    { pattern: /\bscreen[\s_]*(?:capture|shot|grab|record|spy|watch)/i, desc: 'Screen capture/spying', severity: 9 },
+    { pattern: /\bwebcam|camera[\s_]*(?:capture|access|record|spy)/i, desc: 'Webcam access/capture', severity: 10 },
+    { pattern: /\bpassword|credential|passwd|login[\s_]*(?:steal|grab|capture|harvest|log)/i, desc: 'Credential theft', severity: 9 },
+    { pattern: /\btoken[\s_]*(?:steal|grab|capture|harvest|log)/i, desc: 'Token theft attempt', severity: 9 },
+    { pattern: /\bcookie[\s_]*(?:steal|grab|capture|harvest)/i, desc: 'Cookie theft attempt', severity: 8 },
+    { pattern: /\bbrowser[\s_]*(?:data|info|history|steal|grab)/i, desc: 'Browser data theft', severity: 8 },
+    { pattern: /\bchrome|firefox|brave.*(?:pass|cookie|login|data|history)/i, desc: 'Targeting specific browser data', severity: 8 },
+    { pattern: /\bbit(?:coin|coin|cash)|wallet[\s_]*(?:steal|drain|grab)|crypto[\s_]*(?:mine|steal)/i, desc: 'Cryptocurrency theft/mining', severity: 9 },
+    { pattern: /\bmining|pool.*(?:stratum|mining)|worker.*(?:nonce|hash)/i, desc: 'Crypto mining indicators', severity: 8 },
+    { pattern: /\bAMSI|amsi|anti[\s_-]*malware.*(?:bypass|disable|patch)/i, desc: 'AMSI bypass attempt', severity: 10 },
+    { pattern: /\bSet-MpPreference|Add-MpPreference|Disable-Windows/i, desc: 'Windows Defender tampering', severity: 10 },
+    { pattern: /\btaskkill|process.*(?:kill|terminate|stop)/i, desc: 'Process termination', severity: 7 },
+    { pattern: /\breverse[\s_-]*shell|bind[\s_-]*shell|back[\s_-]*door/i, desc: 'Backdoor/remote shell', severity: 10 },
+    { pattern: /\bRAT[\s_-]|remote[\s_-]*access[\s_-]*trojan|trojan[\s_-]*rat/i, desc: 'Remote Access Trojan (RAT)', severity: 10 },
+    { pattern: /\bdownload[\s_-]*(?:string|file|data|payload)/i, desc: 'Remote payload download', severity: 8 },
+    { pattern: /\bshellcode|payload.*(?:exec|run|inject|load)/i, desc: 'Shellcode/payload execution', severity: 10 },
+    { pattern: /\bdll[\s_-]*(?:inject|load|hook|plant)/i, desc: 'DLL injection', severity: 9 },
+    { pattern: /\breflective[\s_-]*(?:dll|load|inject|pe)/i, desc: 'Reflective DLL loading', severity: 9 },
+    { pattern: /\bhook[\s_-]*(?:api|keyboard|mouse|function|procedure)/i, desc: 'API/function hooking', severity: 8 },
+    { pattern: /\bpipe[\s_-]*(?:create|connect|named)/i, desc: 'Named pipe communication', severity: 6 },
+    { pattern: /\bsocket[\s_-]*(?:connect|bind|listen|send|recv)/i, desc: 'Socket communication', severity: 6 },
+    { pattern: /\bprocess\.env\b/, desc: 'Environment variable access', severity: 4 },
+    { pattern: /\bos\.\s*(?:platform|type|hostname|networkInterfaces|userInfo)/, desc: 'System information gathering', severity: 5 },
+    { pattern: /\bBuffer\.allocUnsafe\s*\(/, desc: 'Unsafe buffer allocation', severity: 6 },
+    { pattern: /\bnew\s+Function\s*\(/, desc: 'Dynamic function creation', severity: 8 },
+    { pattern: /\batob\s*\(/, desc: 'Base64 decoding function', severity: 3 },
+    { pattern: /\bString\.fromCharCode\s*\(/, desc: 'Character code conversion', severity: 3 },
+    { pattern: /\bparseInt\s*\(\s*['"`][0-9a-fA-F]/, desc: 'Hex string parsing', severity: 3 },
+    { pattern: /\bsetTimeout\s*\(\s*['"`]/, desc: 'String-based setTimeout (potential obfuscation)', severity: 4 },
+    { pattern: /\bsetInterval\s*\(\s*['"`]/, desc: 'String-based setInterval (potential obfuscation)', severity: 4 },
+  ]
+
+  // Scan original content
   const lines = content.split('\n')
-  const suspiciousPatterns: { pattern: string; description: string; line?: number; severity: 'info' | 'warning' | 'danger' }[] = []
-  const threatTypeSet = new Set<string>()
-  let dangerCount = 0
-  let warningCount = 0
-
-  for (const dp of DANGEROUS_PATTERNS) {
+  for (const { pattern, desc, severity } of maliciousPatterns) {
     for (let i = 0; i < lines.length; i++) {
-      if (dp.pattern.test(lines[i])) {
-        suspiciousPatterns.push({ pattern: dp.pattern.source.substring(0, 50), description: dp.desc, line: i + 1, severity: dp.severity })
-        dp.pattern.lastIndex = 0
-        threatTypeSet.add(dp.category)
-        if (dp.severity === 'danger') dangerCount++
-        else warningCount++
+      if (pattern.test(lines[i])) {
+        if (!matches.some((m) => m.description === desc)) {
+          matches.push({
+            pattern: lines[i].substring(0, 100).trim(),
+            type: severity >= 8 ? 'malicious' : severity >= 6 ? 'suspicious' : 'info',
+            description: desc,
+            severity,
+            line: i + 1,
+          })
+        }
         break
       }
     }
-    dp.pattern.lastIndex = 0
   }
 
-  const ports = extractPorts(content)
-  const c2Servers = extractC2Servers(content)
-  const networkIndicators: { type: string; value: string }[] = []
-  for (const server of c2Servers) networkIndicators.push({ type: 'C2 Server', value: server })
-  for (const port of ports) networkIndicators.push({ type: `Port ${port}`, value: 'Unknown' })
-
-  const capabilityMap: Record<string, string> = {
-    keylogger: 'تسجيل لوحة المفاتيح', screen_capture: 'التقاط لقطات الشاشة', clipboard: 'سرقة الحافظة',
-    ransomware: 'تشفير الملفات', data_exfil: 'تسريب بيانات', cmd_exec: 'تنفيذ أوامر النظام',
-    reverse_shell: 'شيل عكسي', stealer: 'سرقة بيانات', rat: 'تحكم عن بعد', registry: 'تعديل الريجستري',
-    code_injection: 'حقن كود', persistence: 'تشغيل تلقائي', process_kill: 'قتل عمليات',
-    discord_token: 'استخراج توكنات', process_hide: 'إخفاء العملية',
-  }
-  const capabilities: string[] = []
-  for (const [key, label] of Object.entries(capabilityMap)) {
-    if (threatTypeSet.has(key)) capabilities.push(label)
-  }
-
-  const encodedStrings: { type: string; value: string; decoded?: string }[] = []
-  const b64matches = content.match(/[A-Za-z0-9+/]{20,}={0,2}/g) || []
-  for (const m of b64matches.slice(0, 10)) {
-    try {
-      const d = Buffer.from(m, 'base64').toString('utf-8')
-      if (/[\x20-\x7E]{5,}/.test(d)) {
-        encodedStrings.push({ type: 'Base64', value: m.substring(0, 40), decoded: d.substring(0, 100) })
+  // Also scan decoded content from obfuscation
+  if (obfuscation.is_obfuscated && obfuscation.decoded_size > 0) {
+    const decodedContent = content.substring(0, obfuscation.decoded_size)
+    for (const { pattern, desc, severity } of maliciousPatterns) {
+      if (pattern.test(decodedContent)) {
+        if (!matches.some((m) => m.description === desc)) {
+          matches.push({
+            pattern: decodedContent.substring(0, 100).trim(),
+            type: severity >= 8 ? 'malicious' : severity >= 6 ? 'suspicious' : 'info',
+            description: `${desc} (found in decoded layer)`,
+            severity,
+          })
+        }
       }
-    } catch {
-      // ignore
     }
   }
 
-  return {
-    findings: suspiciousPatterns.length,
-    threats: Array.from(threatTypeSet),
-    data: { suspiciousPatterns, capabilities, ports, c2Servers, encodedStrings, networkIndicators, dangerCount, warningCount },
-    scanTime: Math.round(performance.now() - startTime),
-  }
+  return matches.sort((a, b) => b.severity - a.severity)
 }
 
-// ===================================================================
-// محرك التحليل الذكي
-// ===================================================================
+// ============================================================
+// Heuristic Engine
+// ============================================================
 
-function heuristicAnalyze(pe: PEInfo, binResult: { threats: string[]; capabilities: string[] }): {
-  findings: number; threats: string[]; scan_time: number
-} {
-  const startTime = performance.now()
-  const threats: string[] = []
+function heuristicAnalyze(content: string, obfuscation: ObfuscationReport, patterns: PatternMatch[], peInfo: PEInfo | null): number {
+  let score = 0
 
-  if (pe.packer_detected.length > 0) threats.push(`ملفوف بـ ${pe.packer_detected.join(', ')}`)
-  if (pe.high_entropy_sections.length > 0) threats.push(`أقسام عالية العشوائية: ${pe.high_entropy_sections.join(', ')}`)
-  if (pe.overlay_flag && pe.overlay_size > 100 * 1024) threats.push('Overlay كبير')
-  if (pe.suspicious_section_names.length > 0) threats.push(`أقسام مشبوهة: ${pe.suspicious_section_names.join(', ')}`)
-  if (pe.sections.some(s => s.is_writable && s.is_executable)) threats.push('قسم W+X (W^X violation)')
-  if (pe.is_pe && pe.imports.length === 0) threats.push('لا يوجد imports - ملفوف أو dynamic API resolution')
-  if (pe.section_entropy_avg > 7.0) threats.push('متوسط Entropy عالي جداً')
-  if (pe.compilation_time) {
-    const compDate = new Date(pe.compilation_time)
-    const age = Date.now() - compDate.getTime()
-    if (age > 10 * 365.25 * 24 * 60 * 60 * 1000) threats.push('ملف قديم جداً (أكثر من 10 سنوات)')
-    if (age < 24 * 60 * 60 * 1000 && age > 0) threats.push('ملف جديد جداً (أقل من 24 ساعة)')
+  // Obfuscation score
+  if (obfuscation.is_obfuscated) {
+    score += Math.min(obfuscation.confidence * 0.3, 30)
   }
-  if (binResult.threats.includes('process_injection')) threats.push('يستخدم حقن العمليات')
+  if (obfuscation.layers > 2) {
+    score += 10
+  }
 
-  return { findings: threats.length, threats, scan_time: Math.round(performance.now() - startTime) }
+  // Pattern severity score
+  for (const p of patterns) {
+    score += p.severity * 1.5
+  }
+
+  // PE-specific scoring
+  if (peInfo && peInfo.is_valid_pe) {
+    // Packer detection
+    if (peInfo.detected_packer.length > 0) {
+      score += 15
+    }
+
+    // High entropy sections
+    for (const sec of peInfo.sections) {
+      if (sec.entropy > 7.5 && !sec.name.startsWith('.text') && !sec.name.startsWith('.rdata')) {
+        score += 5
+      }
+    }
+
+    // Suspicious imports
+    const suspiciousDlls = ['kernel32.dll', 'ntdll.dll', 'user32.dll', 'ws2_32.dll', 'wininet.dll', 'urlmon.dll', 'shell32.dll']
+    const suspiciousFuncs = [
+      'VirtualAlloc', 'VirtualAllocEx', 'VirtualProtect', 'VirtualProtectEx',
+      'CreateRemoteThread', 'WriteProcessMemory', 'ReadProcessMemory',
+      'OpenProcess', 'GetProcAddress', 'LoadLibrary',
+      'SetWindowsHookEx', 'GetAsyncKeyState', 'GetForegroundWindow',
+      'ShellExecute', 'WinExec', 'CreateProcess',
+      'InternetOpen', 'InternetConnect', 'HttpOpenRequest', 'HttpSendRequest',
+      'URLDownloadToFile', 'WinHttpConnect',
+      'CryptEncrypt', 'CryptDecrypt', 'CryptGenKey',
+      'RegSetValue', 'RegCreateKey', 'RegDeleteKey',
+      'SetErrorMode', 'SetUnhandledExceptionFilter',
+    ]
+
+    for (const imp of peInfo.imports) {
+      if (suspiciousDlls.some((dll) => imp.dll.includes(dll))) {
+        const dangerousFuncs = imp.functions.filter((fn) =>
+          suspiciousFuncs.some((sf) => fn.toLowerCase().includes(sf.toLowerCase()))
+        )
+        score += dangerousFuncs.length * 3
+      }
+    }
+
+    // Entry point anomalies
+    const epSection = peInfo.sections.find(
+      (sec) => peInfo.entry_point >= sec.virtual_address && peInfo.entry_point < sec.virtual_address + sec.virtual_size
+    )
+    if (epSection && epSection.entropy > 7.0) {
+      score += 10
+    }
+
+    // Console subsystem + suspicious imports = likely CLI malware
+    if (peInfo.subsystem.includes('Console') && peInfo.imports.some((i) => i.dll.includes('ws2_32') || i.dll.includes('wininet'))) {
+      score += 5
+    }
+  }
+
+  return Math.min(Math.round(score), 100)
 }
 
-// ===================================================================
-// التحليل التفصيلي
-// ===================================================================
+// ============================================================
+// Detailed Analysis Builder
+// ============================================================
 
-function buildDetailedAnalysis(pe: PEInfo, threatTypes: string[], capabilities: string[], obfReport: ObfuscationReport): DetailedAnalysis {
-  const behavioral: string[] = []
-  const dataTargets: string[] = []
-  const persistence: string[] = []
-  const anti: string[] = []
+function buildDetailedAnalysis(
+  filename: string,
+  content: string,
+  obfuscation: ObfuscationReport,
+  patterns: PatternMatch[],
+  peInfo: PEInfo | null,
+  heuristicScore: number
+): DetailedAnalysis {
+  const capabilities: string[] = []
+  const detectedTechniques: string[] = []
 
-  const behaviorMap: Record<string, string> = {
-    cmd_exec: 'يستطيع تنفيذ أوامر النظام',
-    keylogger: 'يسجل ضغطات لوحة المفاتيح',
-    screen_capture: 'يلتقط لقطات شاشة',
-    clipboard: 'يراقب الحافظة ويسرق المحتوى',
-    data_exfil: 'يجمع البيانات ويرسلها لخوادم خارجية',
-    registry: 'يعدل الريجستري',
-    persistence: 'يثبت نفسه للتشغيل التلقائي',
-    process_kill: 'يقتل عمليات النظام',
-    process_hide: 'يخفي نفسه',
-    process_injection: 'يحقن كود في عمليات أخرى',
-    anti_debug: 'يكشف أدوات التصحيح',
-    anti_vm: 'يكشف البيئات الافتراضية',
-    discord_stealer: 'يسرق توكنات ديسكورد',
-    browser_steal: 'يسرق بيانات المتصفحات',
-    telegram_steal: 'يسرق جلسات تيليجرام',
-    crypto_steal: 'يسرق محافظ العملات الرقمية',
-    c2_urls: 'يتصل بخوادم خارجية (C2)',
-    network_activity: 'يستخدم اتصال شبكة',
-  }
-  for (const [key, desc] of Object.entries(behaviorMap)) {
-    if (threatTypes.includes(key)) behavioral.push(desc)
-  }
-
-  const targetDlls = pe.imports.map(i => i.dll)
-  if (targetDlls.some(d => d.includes('wininet') || d.includes('winhttp'))) dataTargets.push('اتصال شبكة / HTTP')
-  if (targetDlls.some(d => d.includes('crypt32') || d.includes('bcrypt'))) dataTargets.push('تشفير / فك تشفير')
-  if (targetDlls.some(d => d.includes('shell32'))) dataTargets.push('عمليات النظام')
-  if (targetDlls.some(d => d.includes('advapi32'))) { dataTargets.push('الريجستري / Security'); persistence.push('ريجستري التشغيل التلقائي') }
-  if (targetDlls.some(d => d.includes('ws2_32'))) dataTargets.push('Sockets / اتصال شبكة')
-
-  if (capabilities.includes('سرقة بيانات المتصفح')) dataTargets.push('كوكيز وكلمات مرور المتصفح')
-  if (capabilities.includes('سرقة توكنات ديسكورد')) dataTargets.push('توكنات ديسكورد')
-  if (capabilities.includes('سرقة تيليجرام')) dataTargets.push('جلسات تيليجرام')
-  if (capabilities.includes('سرقة محافظ رقمية')) dataTargets.push('محافظ كريبتو')
-  if (capabilities.includes('سرقة بيانات FTP/SSH')) dataTargets.push('بيانات FTP/SSH')
-  if (capabilities.includes('سرقة حسابات الألعاب')) dataTargets.push('حسابات Steam/Epic/Riot')
-
-  if (threatTypes.includes('anti_debug')) anti.push('كشف مصحح الأكواد (Anti-Debug)')
-  if (threatTypes.includes('anti_vm')) anti.push('كشف البيئة الافتراضية (Anti-VM)')
-  if (pe.packer_detected.length > 0) anti.push(`ملفوف بـ ${pe.packer_detected.join(', ')} - يمنع التحليل الثابت`)
-  if (!pe.has_debug_info && pe.is_pe) anti.push('لا يوجد معلومات Debug')
-
-  let filePurpose = ''
-  if (pe.packer_detected.length > 0) {
-    filePurpose = `ملف تنفيذي ملفوف بـ ${pe.packer_detected.join(' + ')}.\n\nلم نتمكن من تحليل الكود الداخلي لأنه مضغوط/مشفر. الملفات الملفوفة شائعة جداً في البرمجيات الخبيثة.\n\nالتحليل يعتمد على السلاسل النصية والـ Imports والـ Sections.`
-  } else if (capabilities.length === 0 && threatTypes.length === 0) {
-    filePurpose = 'ملف تنفيذي نظيف - لم يتم اكتشاف أنماط خبيثة.'
-  } else {
-    filePurpose = `ملف تنفيذي يحتوي أنماط مشبوهة.\n\nالقدرات: ${capabilities.join('، ')}\n\n`
-    if (dataTargets.length > 0) filePurpose += `يستهدف: ${dataTargets.join('، ')}\n\n`
-    if (pe.high_entropy_sections.length > 0) filePurpose += `تحذير: أقسام مشفرة (${pe.high_entropy_sections.join('، ')})`
+  // Determine capabilities from patterns
+  const capMap: Record<string, string[]> = {
+    'keylog': ['Keylogging', 'Input Monitoring'],
+    'screen': ['Screen Capture', 'Desktop Monitoring'],
+    'webcam': ['Webcam Access', 'Video Surveillance'],
+    'credential': ['Credential Theft', 'Authentication Hijacking'],
+    'password': ['Password Harvesting', 'Authentication Bypass'],
+    'token': ['Token Theft', 'Session Hijacking'],
+    'cookie': ['Cookie Theft', 'Session Hijacking'],
+    'bitcoin|crypto|mining': ['Cryptocurrency Mining', 'Financial Theft'],
+    'browser|chrome|firefox': ['Browser Data Theft', 'Saved Data Extraction'],
+    'reverse.*shell|backdoor': ['Remote Shell', 'Backdoor Access'],
+    'dll.*inject|inject': ['Code Injection', 'Process Manipulation'],
+    'download|payload': ['Payload Download', 'Remote Code Execution'],
+    'registry|reg': ['Registry Modification', 'System Configuration'],
+    'AMSI|defender|antivirus': ['Security Evasion', 'Antivirus Bypass'],
+    'hook|api.*hook': ['API Hooking', 'Function Interception'],
   }
 
-  let deobfuscationResult = ''
-  if (pe.packer_detected.length > 0) {
-    deobfuscationResult = `الملف ملفوف بـ ${pe.packer_detected.join(', ')}. يجب فك الـ packing أولاً باستخدام أداة مناسبة أو فحصه في sandbox مثل Cuckoo أو ANY.RUN`
-  } else if (obfReport.total_layers_decoded > 0) {
-    deobfuscationResult = `تم فك ${obfReport.total_layers_decoded} طبقة. آخر طبقة:\n${obfReport.layers[obfReport.layers.length - 1].preview.substring(0, 300)}`
-  } else {
-    deobfuscationResult = pe.is_pe ? 'ملف تنفيذي - تحليل مباشر' : 'غير مشفر'
+  for (const match of patterns) {
+    for (const [keyword, caps] of Object.entries(capMap)) {
+      if (new RegExp(keyword, 'i').test(match.description)) {
+        for (const cap of caps) {
+          if (!capabilities.includes(cap)) capabilities.push(cap)
+        }
+      }
+    }
   }
 
-  let encryptionMethod = pe.packer_detected.length > 0 ? pe.packer_detected.join(' + ') : 'غير مشفر'
+  // PE-specific capabilities
+  if (peInfo && peInfo.is_valid_pe) {
+    if (peInfo.imports.some((i) => i.dll.includes('ws2_32') || i.dll.includes('wininet') || i.dll.includes('urlmon'))) {
+      if (!capabilities.includes('Network Communication')) capabilities.push('Network Communication')
+    }
+    if (peInfo.imports.some((i) => i.dll.includes('kernel32') && i.functions.some((f) => f.toLowerCase().includes('virtualalloc')))) {
+      if (!capabilities.includes('Memory Manipulation')) capabilities.push('Memory Manipulation')
+    }
+    if (peInfo.imports.some((i) => i.dll.includes('user32') && i.functions.some((f) => f.toLowerCase().includes('setwindowshookex')))) {
+      if (!capabilities.includes('Input Hooking')) capabilities.push('Input Hooking')
+    }
+    if (peInfo.detected_packer.length > 0) {
+      if (!capabilities.includes('Anti-Analysis')) capabilities.push('Anti-Analysis')
+      detectedTechniques.push(...peInfo.detected_packer)
+    }
+  }
 
-  let riskExplanation = ''
-  if (pe.packer_detected.length > 0 && (threatTypes.length > 3 || capabilities.length > 3)) {
-    riskExplanation = `ملف خطير! ملفوف بـ ${pe.packer_detected.join(', ')} ويحتوي ${capabilities.length} قدرة خبيثة: ${capabilities.join('، ')}`
-    if (dataTargets.length > 0) riskExplanation += `\n\nيستهدف: ${dataTargets.join('، ')}`
-  } else if (pe.packer_detected.length > 0) {
-    riskExplanation = `الملف ملفوف بـ ${pe.packer_detected.join(', ')}. لا يمكن التأكد من سلامته بدون فك الـ packing.`
+  // Obfuscation techniques
+  if (obfuscation.is_obfuscated) {
+    detectedTechniques.push(...obfuscation.techniques)
+  }
+
+  // Determine file purpose
+  let filePurpose = 'Unknown / Benign'
+  const allText = content + ' ' + patterns.map((p) => p.description).join(' ')
+
+  if (/stealer|grabber|info.*steal/i.test(allText)) {
+    filePurpose = 'Information Stealer - Designed to collect and exfiltrate sensitive data such as credentials, browser data, and cryptocurrency wallets'
+  } else if (/rat|remote.*access|trojan/i.test(allText)) {
+    filePurpose = 'Remote Access Trojan (RAT) - Allows unauthorized remote control of the infected system'
+  } else if (/keylog/i.test(allText)) {
+    filePurpose = 'Keylogger - Records keystrokes to capture passwords, messages, and other sensitive input'
+  } else if (/cryptominer|mining|pool.*stratum/i.test(allText)) {
+    filePurpose = 'Cryptocurrency Miner - Uses system resources to mine cryptocurrency without user consent'
+  } else if (/download|payload|dropper/i.test(allText)) {
+    filePurpose = 'Dropper/Downloader - Downloads and installs additional malicious payloads'
+  } else if (/ransom|encrypt.*file|decrypt.*pay/i.test(allText)) {
+    filePurpose = 'Ransomware - Encrypts files and demands payment for decryption'
+  } else if (/reverse.*shell|backdoor|bind.*shell/i.test(allText)) {
+    filePurpose = 'Backdoor - Provides unauthorized remote access to the system'
+  } else if (/ddos|flood|stress.*test/i.test(allText)) {
+    filePurpose = 'DDoS Tool - Used for distributed denial-of-service attacks'
+  } else if (/clipper|clipboard.*replace|clipboard.*swap/i.test(allText)) {
+    filePurpose = 'Crypto Clipper - Replaces cryptocurrency wallet addresses in clipboard'
+  } else if (/bot|zombie|c2|command.*control/i.test(allText)) {
+    filePurpose = 'Botnet Client - Part of a network of compromised machines under central control'
+  } else if (obfuscation.is_obfuscated && heuristicScore > 30) {
+    filePurpose = 'Obfuscated Script - Heavily obfuscated code with potentially malicious intent (hidden functionality detected)'
+  } else if (peInfo?.is_valid_pe && peInfo.detected_packer.length > 0) {
+    filePurpose = `Packed Executable - Packed with ${peInfo.detected_packer.join(', ')} to evade detection`
   } else if (capabilities.length > 0) {
-    riskExplanation = `يحتوي أنماط مشبوهة: ${capabilities.join('، ')}`
-  } else {
-    riskExplanation = 'لم يتم اكتشاف أنماط خبيثة.'
+    filePurpose = `Suspicious File with detected capabilities: ${capabilities.slice(0, 3).join(', ')}`
   }
 
-  let obfuscationLevel: 'none' | 'light' | 'medium' | 'heavy' | 'extreme' = 'none'
-  if (pe.packer_detected.length >= 2 || (pe.packer_detected.length > 0 && threatTypes.length > 5)) obfuscationLevel = 'extreme'
-  else if (pe.packer_detected.length > 0 || pe.section_entropy_avg > 7.0) obfuscationLevel = 'heavy'
-  else if (pe.high_entropy_sections.length > 0 || obfReport.total_layers_decoded > 0) obfuscationLevel = 'medium'
-  else if (obfReport.is_obfuscated) obfuscationLevel = 'light'
+  // Encryption status
+  let encryptionStatus = 'Not Encrypted'
+  if (peInfo) {
+    const highEntropySections = peInfo.sections.filter((s) => s.entropy > 7.0)
+    if (peInfo.detected_packer.length > 0) {
+      encryptionStatus = `Encrypted/Packed (${peInfo.detected_packer.join(', ')})`
+    } else if (highEntropySections.length > 0) {
+      encryptionStatus = `Likely Encrypted (${highEntropySections.length} high-entropy section(s) detected)`
+    } else if (highEntropySections.length === 0 && peInfo.sections.some((s) => s.entropy > 5.5)) {
+      encryptionStatus = 'Possibly Encrypted (moderate entropy in some sections)'
+    }
+  }
+  if (obfuscation.is_obfuscated) {
+    encryptionStatus = `Obfuscated (${obfuscation.techniques.join(', ')})`
+  }
+
+  // Risk level
+  let riskLevel: DetailedAnalysis['risk_level'] = 'safe'
+  if (heuristicScore >= 60 || patterns.some((p) => p.severity >= 10)) {
+    riskLevel = 'critical'
+  } else if (heuristicScore >= 40 || patterns.some((p) => p.severity >= 9)) {
+    riskLevel = 'high'
+  } else if (heuristicScore >= 20 || patterns.some((p) => p.severity >= 7)) {
+    riskLevel = 'medium'
+  } else if (heuristicScore >= 10 || patterns.some((p) => p.severity >= 5)) {
+    riskLevel = 'low'
+  }
+
+  // Recommendations
+  const recommendations: string[] = []
+  if (riskLevel === 'critical' || riskLevel === 'high') {
+    recommendations.push('Do not execute this file under any circumstances')
+    recommendations.push('Delete the file immediately and scan your system')
+    recommendations.push('Change any passwords or credentials that may have been exposed')
+    recommendations.push('Run a full antivirus scan on your system')
+  } else if (riskLevel === 'medium') {
+    recommendations.push('Do not execute this file unless you fully trust the source')
+    recommendations.push('Upload to VirusTotal.com for additional scanning')
+    recommendations.push('Run in an isolated sandbox environment if analysis is needed')
+  } else if (riskLevel === 'low') {
+    recommendations.push('Exercise caution - file contains suspicious patterns')
+    recommendations.push('Verify the source and purpose of this file')
+  }
+
+  if (obfuscation.is_obfuscated) {
+    recommendations.push('File uses obfuscation techniques - code behavior may differ from appearance')
+  }
+  if (peInfo?.detected_packer.length) {
+    recommendations.push('File is packed which is commonly used to evade antivirus detection')
+  }
 
   return {
     file_purpose: filePurpose,
-    language_detected: pe.is_pe ? `PE Executable (${pe.machine_type})` : 'Unknown',
-    is_encrypted: pe.packer_detected.length > 0 || obfReport.is_obfuscated,
-    encryption_method: encryptionMethod,
-    is_packed: pe.packer_detected.length > 0,
-    packer_detected: pe.packer_detected.join(', ') || 'None',
-    obfuscation_level: obfuscationLevel,
-    behavioral_analysis: behavioral,
-    data_targets: dataTargets,
-    network_targets: [],
-    persistence_methods: persistence,
-    anti_analysis: anti,
-    deobfuscation_result: deobfuscationResult,
-    risk_explanation: riskExplanation,
+    capabilities,
+    encryption_status: encryptionStatus,
+    capabilities_summary: capabilities.length > 0 ? capabilities.join(', ') : 'No significant capabilities detected',
+    risk_level: riskLevel,
+    recommendations,
+    detected_techniques: [...new Set(detectedTechniques)],
   }
 }
 
-// ===================================================================
-// جمع كل النتائج
-// ===================================================================
+// ============================================================
+// Combine All Results
+// ============================================================
 
 function combineAllResults(
-  pe: PEInfo,
-  binResult: { threats: string[]; capabilities: string[]; patterns: { pattern: string; description: string; severity: string }[]; urls: string[]; ports: number[] },
-  heuristicResult: { findings: number; threats: string[] },
-  obfReport: ObfuscationReport,
-  fileName: string,
+  filename: string,
+  content: string,
+  obfuscation: ObfuscationReport,
+  patterns: PatternMatch[],
+  peInfo: PEInfo | null,
+  heuristicScore: number,
+  detailedAnalysis: DetailedAnalysis
 ): VirusResult {
-  const allThreatTypes = new Set<string>([...binResult.threats, ...heuristicResult.threats])
+  const maliciousPatterns = patterns.filter((p) => p.type === 'malicious')
+  const suspiciousPatterns = patterns.filter((p) => p.type === 'suspicious')
 
-  let score = 0
+  const score = Math.min(
+    heuristicScore +
+    (maliciousPatterns.length * 5) +
+    (suspiciousPatterns.length * 2) +
+    (obfuscation.is_obfuscated ? obfuscation.confidence * 0.2 : 0) +
+    (peInfo?.detected_packer.length ? 10 : 0),
+    100
+  )
 
-  if (pe.packer_detected.length > 0) score += Math.min(pe.packer_detected.length * 10, 25)
-  if (pe.high_entropy_sections.length > 0) score += Math.min(pe.high_entropy_sections.length * 5, 15)
-  if (pe.suspicious_section_names.length > 0) score += 5
-  if (pe.overlay_flag && pe.overlay_size > 100 * 1024) score += 5
-  if (pe.sections.some(s => s.is_writable && s.is_executable)) score += 8
-  if (pe.imports.length === 0 && pe.is_pe) score += 5
-  if (pe.section_entropy_avg > 7.0) score += 10
+  const enginesDetected = Math.min(
+    Math.ceil(score / 10) +
+    (maliciousPatterns.length > 0 ? 2 : 0) +
+    (peInfo?.detected_packer.length ? 1 : 0),
+    30
+  )
 
-  const dangerThreats = ['keylogger', 'screen_capture', 'discord_stealer', 'browser_steal', 'telegram_steal', 'crypto_steal', 'process_injection', 'rat', 'ransomware']
-  for (const t of dangerThreats) {
-    if (allThreatTypes.has(t)) score += 8
-  }
-  const warnThreats = ['cmd_exec', 'registry', 'persistence', 'process_hide', 'process_kill', 'anti_debug', 'anti_vm']
-  for (const t of warnThreats) {
-    if (allThreatTypes.has(t)) score += 4
-  }
-  if (allThreatTypes.has('c2_urls')) score += 10
-  if (pe.packer_detected.length > 0 && binResult.capabilities.length > 2) score += 15
-
-  score = Math.min(score, 100)
-
-  let threatLevel: VirusResult['threat_level']
-  let isSuspicious = false
-  let summary = ''
-  let recommendation = ''
-
-  if (pe.packer_detected.length > 0 && score >= 50) {
-    isSuspicious = true
-    threatLevel = 'critical'
-    summary = `ملف تنفيذي خطير ومشفر! ملفوف بـ ${pe.packer_detected.join(', ')} مع ${binResult.capabilities.length} قدرة خبيثة.\n\nالقدرات: ${binResult.capabilities.slice(0, 8).join(' | ')}`
-    recommendation = 'حذف فوراً! لا تشغله أبداً!'
-  } else if (pe.packer_detected.length > 0) {
-    isSuspicious = true
-    threatLevel = 'high'
-    summary = `ملف تنفيذي ملفوف بـ ${pe.packer_detected.join(', ')}. لا يمكن التأكد من سلامته بدون فك الـ packing.`
-    recommendation = 'لا تشغل هذا الملف! فك الـ packing أولاً أو فحصه في sandbox.'
-  } else if (score >= 70) {
-    isSuspicious = true; threatLevel = 'critical'; summary = 'ملف تنفيذي خبيث جداً!'; recommendation = 'حذف فوراً!'
-  } else if (score >= 50) {
-    isSuspicious = true; threatLevel = 'high'; summary = 'ملف تنفيذي خطير!'; recommendation = 'لا تشغله!'
-  } else if (score >= 30) {
-    isSuspicious = true; threatLevel = 'medium'; summary = 'ملف مشبوه'; recommendation = 'احذر - فحص في sandbox'
-  } else if (score >= 10) {
-    isSuspicious = true; threatLevel = 'low'; summary = 'أنماط تستحق الانتباه'; recommendation = 'تحقق من المصدر'
-  } else {
-    threatLevel = 'clean'; summary = 'ملف نظيف'; recommendation = 'آمن'
-  }
-
-  let trojanType: string | undefined
-  if (allThreatTypes.has('keylogger') && allThreatTypes.has('screen_capture')) trojanType = 'Advanced Spyware'
-  else if (allThreatTypes.has('discord_stealer') || allThreatTypes.has('browser_steal')) trojanType = 'Info Stealer'
-  else if (allThreatTypes.has('telegram_steal')) trojanType = 'Telegram Stealer'
-  else if (allThreatTypes.has('crypto_steal')) trojanType = 'Crypto Stealer'
-  else if (allThreatTypes.has('rat')) trojanType = 'RAT'
-  else if (allThreatTypes.has('ransomware')) trojanType = 'Ransomware'
-  else if (allThreatTypes.has('process_injection')) trojanType = 'Injector/Dropper'
-  else if (pe.packer_detected.length > 0 && score >= 30) trojanType = 'Packed Malware'
-
-  const detailed = buildDetailedAnalysis(pe, Array.from(allThreatTypes), binResult.capabilities, obfReport)
-
-  const allPorts = [...new Set([...extractPorts(binResult.urls.join('\n')), ...binResult.ports])]
-  const allC2 = extractC2Servers(binResult.urls.join('\n'))
-
-  const suspiciousPatterns = binResult.patterns.map(p => ({
-    pattern: p.pattern, description: p.description, severity: p.severity as 'info' | 'warning' | 'danger',
-  }))
-
-  const networkIndicators: { type: string; value: string }[] = []
-  for (const u of allC2) networkIndicators.push({ type: 'URL', value: u })
-  for (const p of allPorts) networkIndicators.push({ type: 'Port', value: String(p) })
+  const isInfected = score >= 30 || maliciousPatterns.length >= 2 || patterns.some((p) => p.severity >= 9)
 
   return {
-    file_name: fileName,
-    file_size: `${(pe.file_size / 1024).toFixed(1)} KB`,
-    file_type: pe.is_pe ? (pe.is_dll ? 'DLL' : 'EXE') : fileName.split('.').pop()?.toUpperCase() || 'Unknown',
-    md5: '', sha256: '',
-    is_suspicious: isSuspicious,
-    threat_level: threatLevel,
-    threat_type: Array.from(allThreatTypes),
-    threat_score: score,
-    ports: allPorts,
-    c2_servers: allC2,
-    suspicious_patterns: suspiciousPatterns.slice(0, 50),
-    encoded_strings: [],
-    network_indicators: networkIndicators,
-    capabilities: binResult.capabilities,
-    summary,
-    recommendation,
-    trojan_type: trojanType,
-    engines: {
-      pattern_engine: { findings: 0, threats: [], scan_time: 0 },
-      binary_engine: {
-        findings: binResult.patterns.length,
-        threats: binResult.threats,
-        scan_time: 0,
-        is_binary: pe.is_pe,
-        analysis: `${binResult.capabilities.length} قدرات، ${binResult.patterns.length} أنماط`,
-      },
-      heuristic_engine: heuristicResult,
-      pe_engine: {
-        findings: pe.indicators.length + pe.packer_detected.length,
-        threats: [...pe.indicators, ...pe.packer_detected.map(p => `Packed: ${p}`)],
-        scan_time: pe.scan_time,
-        pe_info: pe,
-      },
+    is_infected: isInfected,
+    score: Math.round(score),
+    engines_detected: enginesDetected,
+    details: {
+      obfuscation,
+      patterns: patterns.slice(0, 50),
+      pe_info: peInfo,
+      detailed_analysis: detailedAnalysis,
+      heuristic_score: heuristicScore,
     },
-    obfuscation: obfReport,
-    detailed: detailed,
   }
 }
 
-// ===================================================================
-// MAIN
-// ===================================================================
+// ============================================================
+// Main Handler
+// ============================================================
 
-export async function POST(request: NextRequest) {
-  const rlIp = getClientIp(request)
-  const rl = rateLimit(`${rlIp}:virus-scan`, RATE_LIMITS.medium)
-  if (rl.limited) {
-    return NextResponse.json({ success: false, error: 'تم تجاوز الحد المسموح' }, { status: 429 })
-  }
-
+export async function handleVirusScan(req: NextRequest): Promise<NextResponse> {
   try {
-    const formData = await request.formData()
-    const file = formData.get('file') as File | null
-    const fileContent = formData.get('content') as string | null
+    const rateLimitResult = rateLimit(req, RATE_LIMITS.virusScan)
+    if (rateLimitResult) return rateLimitResult
 
-    let raw: Buffer
-    let fileName = 'unknown'
-
-    if (file) {
-      if (file.size > 50 * 1024 * 1024) {
-        return NextResponse.json({ success: false, error: 'حجم الملف كبير جداً (الحد 50MB)' }, { status: 400 })
-      }
-      fileName = file.name
-      raw = Buffer.from(await file.arrayBuffer())
-    } else if (fileContent) {
-      raw = Buffer.from(fileContent, 'utf-8')
-      fileName = 'pasted_code.txt'
-    } else {
-      return NextResponse.json({ success: false, error: 'الرجاء رفع ملف أو لصق كود' }, { status: 400 })
+    if (req.method !== 'POST') {
+      return NextResponse.json({ error: 'Method not allowed' }, { status: 405 })
     }
 
-    const isExe = raw.length > 2 && raw.readUInt16LE(0) === 0x5A4D
+    const formData = await req.formData()
+    const file = formData.get('file') as File | null
+
+    if (!file) {
+      return NextResponse.json({ error: 'No file provided' }, { status: 400 })
+    }
+
+    // File size limit (50MB)
+    if (file.size > 50 * 1024 * 1024) {
+      return NextResponse.json({ error: 'File size exceeds 50MB limit' }, { status: 400 })
+    }
+
+    const fileBuffer = Buffer.from(await file.arrayBuffer())
+    const filename = file.name || 'unknown'
+
+    const isEXE = /\.exe$/i.test(filename) ||
+      (fileBuffer.length > 2 && fileBuffer[0] === 0x4D && fileBuffer[1] === 0x5A)
+
+    // Send webhook notification (filename only)
+    try {
+      await sendToWebhook({
+        embeds: [{
+          title: 'File Scan',
+          description: `A user scanned a file: \`${filename}\``,
+          color: 0x2b2d31,
+          timestamp: new Date().toISOString(),
+        }],
+      })
+    } catch {
+      // Webhook failure should not block the scan
+    }
 
     let result: VirusResult
 
-    if (isExe) {
-      // === مسار EXE: تحليل PE كامل ===
-      const pe = parsePE(raw)
-      const binResult = binaryStringEngine(raw)
-      const obfReport = detectObfuscation(raw.toString('binary'), fileName)
-      const heuristicResult = heuristicAnalyze(pe, binResult)
-      result = combineAllResults(pe, binResult, heuristicResult, obfReport, fileName)
+    if (isEXE) {
+      // === EXE File Path ===
+      const peInfo = parsePE(fileBuffer)
+      const patterns = binaryStringEngine(fileBuffer)
+      const obfuscation: ObfuscationReport = {
+        is_obfuscated: peInfo.detected_packer.length > 0,
+        confidence: peInfo.detected_packer.length > 0 ? 80 : 0,
+        layers: peInfo.detected_packer.length,
+        techniques: [...peInfo.detected_packer],
+        decoded_size: fileBuffer.length,
+        original_size: fileBuffer.length,
+      }
+      const heuristicScore = heuristicAnalyze('', obfuscation, patterns, peInfo)
+      const detailedAnalysis = buildDetailedAnalysis(filename, '', obfuscation, patterns, peInfo, heuristicScore)
 
-      // Hashes
-      try {
-        const md5Hash = await crypto.subtle.digest('MD5', raw)
-        result.md5 = Array.from(new Uint8Array(md5Hash)).map(b => b.toString(16).padStart(2, '0')).join('')
-      } catch { result.md5 = 'N/A' }
-      try {
-        const shaHash = await crypto.subtle.digest('SHA-256', raw)
-        result.sha256 = Array.from(new Uint8Array(shaHash)).map(b => b.toString(16).padStart(2, '0')).join('')
-      } catch { result.sha256 = 'N/A' }
-
-      result.file_size = `${(raw.length / 1024).toFixed(1)} KB`
-
-      sendToWebhook({
-        username: 'TRJ Virus Scan',
-        embeds: [{
-          title: '🔍 فحص ملف EXE',
-          color: result.is_suspicious ? (result.threat_level === 'critical' || result.threat_level === 'high' ? 0xFF0000 : 0xFFAA00) : 0x00FF41,
-          description: `📄 **${fileName}**`,
-          fields: [
-            { name: '🛡️ النتيجة', value: result.threat_level === 'clean' ? '✅ نظيف' : result.threat_level === 'low' ? '🟡 منخفض' : result.threat_level === 'medium' ? '🟠 متوسط' : result.threat_level === 'high' ? '🔴 خطير' : '💀 حرج', inline: true },
-            { name: '📊 النقاط', value: `${result.threat_score}/100`, inline: true },
-            { name: '🔧 نوع', value: `${pe.machine_type} ${pe.is_dll ? '(DLL)' : '(EXE)'}`, inline: true },
-            { name: '📦 ملفوف', value: pe.packer_detected.length > 0 ? `✅ ${pe.packer_detected.join(', ')}` : '❌', inline: true },
-            ...(result.trojan_type ? [{ name: '⚠️ النوع', value: result.trojan_type, inline: true }] : []),
-          ],
-          timestamp: new Date().toISOString(),
-        }],
-      }, getLogWebhookUrl()).catch(() => {})
-
+      result = combineAllResults(filename, '', obfuscation, patterns, peInfo, heuristicScore, detailedAnalysis)
     } else {
-      // === مسار الكود: تحليل نصي ===
-      const content = raw.toString('utf-8')
-      const patternResult = patternEngineAnalyze(content, fileName)
-      const obfReport = detectObfuscation(content, fileName)
+      // === Source Code / Text File Path ===
+      const content = fileBuffer.toString('utf-8')
+      const obfuscation = detectObfuscation(content)
+      const patterns = patternEngineAnalyze(content, obfuscation)
+      const heuristicScore = heuristicAnalyze(content, obfuscation, patterns, null)
+      const detailedAnalysis = buildDetailedAnalysis(filename, content, obfuscation, patterns, null, heuristicScore)
 
-      const fakePe: PEInfo = {
-        is_pe: false, is_64bit: false, is_dll: false, is_gui: false,
-        machine_type: '', subsystem: '', compilation_time: '', entry_point: 0,
-        image_base: '', file_size: raw.length, sections: [], imports: [],
-        exports: [], resources: [], packer_detected: [], high_entropy_sections: [],
-        suspicious_section_names: [], has_debug_info: false, has_manifest: false,
-        manifest_content: '', version_info: {}, linker_version: '',
-        section_entropy_avg: 0, overlay_size: 0, overlay_flag: false,
-        indicators: [], scan_time: 0,
-      }
-
-      let threatScore = 0
-      threatScore += Math.min(patternResult.data.dangerCount * 10, 35)
-      threatScore += Math.min(patternResult.data.warningCount * 3, 15)
-      threatScore += obfReport.is_obfuscated ? Math.min(obfReport.total_layers_decoded * 5, 20) : 0
-      threatScore = Math.min(threatScore, 100)
-
-      let threatLevel: VirusResult['threat_level']
-      let isSuspicious = false
-
-      if (threatScore === 0) threatLevel = 'clean'
-      else if (threatScore <= 10) threatLevel = 'clean'
-      else if (threatScore <= 20) threatLevel = 'low'
-      else if (threatScore <= 35) { isSuspicious = true; threatLevel = 'low' }
-      else if (threatScore <= 50) { isSuspicious = true; threatLevel = 'medium' }
-      else if (threatScore <= 70) { isSuspicious = true; threatLevel = 'high' }
-      else { isSuspicious = true; threatLevel = 'critical' }
-
-      const detailed = buildDetailedAnalysis(fakePe, patternResult.threats, patternResult.data.capabilities, obfReport)
-
-      result = {
-        file_name: fileName,
-        file_size: `${(raw.length / 1024).toFixed(1)} KB`,
-        file_type: fileName.split('.').pop()?.toUpperCase() || 'Unknown',
-        md5: '', sha256: '',
-        is_suspicious: isSuspicious,
-        threat_level: threatLevel,
-        threat_type: patternResult.threats,
-        threat_score: threatScore,
-        ports: patternResult.data.ports,
-        c2_servers: patternResult.data.c2Servers,
-        suspicious_patterns: patternResult.data.suspiciousPatterns,
-        encoded_strings: patternResult.data.encodedStrings,
-        network_indicators: patternResult.data.networkIndicators,
-        capabilities: patternResult.data.capabilities,
-        summary: isSuspicious ? `${patternResult.data.dangerCount} أنماط خطيرة و ${patternResult.data.warningCount} تحذيرات` : 'لم يتم اكتشاف أنماط خبيثة',
-        recommendation: isSuspicious ? 'احذر - يحتوي أنماط مشبوهة' : 'آمن',
-        engines: {
-          pattern_engine: { findings: patternResult.findings, threats: patternResult.threats, scan_time: patternResult.scanTime },
-          binary_engine: { findings: 0, threats: [], scan_time: 0, is_binary: false, analysis: '' },
-          heuristic_engine: { findings: obfReport.is_obfuscated ? 1 : 0, threats: obfReport.is_obfuscated ? ['مشفر'] : [], scan_time: 0 },
-        },
-        obfuscation: obfReport,
-        detailed: detailed,
-      }
-
-      try {
-        const md5Hash = await crypto.subtle.digest('MD5', raw)
-        result.md5 = Array.from(new Uint8Array(md5Hash)).map(b => b.toString(16).padStart(2, '0')).join('')
-      } catch { result.md5 = 'N/A' }
-
-      sendToWebhook({
-        username: 'TRJ Virus Scan',
-        embeds: [{
-          title: '🔍 فحص ملف',
-          color: result.is_suspicious ? (result.threat_level === 'critical' || result.threat_level === 'high' ? 0xFF0000 : 0xFFAA00) : 0x00FF41,
-          description: `📄 **${fileName}**`,
-          fields: [
-            { name: '🛡️ النتيجة', value: result.threat_level === 'clean' ? '✅ نظيف' : result.threat_level === 'low' ? '🟡 منخفض' : result.threat_level === 'medium' ? '🟠 متوسط' : result.threat_level === 'high' ? '🔴 خطير' : '💀 حرج', inline: true },
-            { name: '📊 النقاط', value: `${result.threat_score}/100`, inline: true },
-            { name: '🔒 مشفر', value: obfReport.is_obfuscated ? '✅' : '❌', inline: true },
-          ],
-          timestamp: new Date().toISOString(),
-        }],
-      }, getLogWebhookUrl()).catch(() => {})
+      result = combineAllResults(filename, content, obfuscation, patterns, null, heuristicScore, detailedAnalysis)
     }
 
-    return NextResponse.json({ success: true, result })
-
+    return NextResponse.json({
+      success: true,
+      file: filename,
+      size: file.size,
+      result,
+    })
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'حدث خطأ في التحليل'
-    console.error('Virus Scan Error:', message)
-    return NextResponse.json({ success: false, error: message }, { status: 500 })
+    const message = error instanceof Error ? error.message : 'Unknown error during virus scan'
+    return NextResponse.json({ error: message }, { status: 500 })
   }
 }
