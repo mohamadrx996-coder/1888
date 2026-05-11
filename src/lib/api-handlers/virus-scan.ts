@@ -86,18 +86,41 @@ interface VirusResult {
 }
 
 // ============================================================
-// Helper Functions
+// Edge-Compatible Helper Functions (Uint8Array + DataView)
 // ============================================================
 
-function readU16LE(buf: Buffer, offset: number): number {
-  return offset + 1 < buf.length ? buf.readUInt16LE(offset) : 0
+function readU16LE(view: DataView, offset: number): number {
+  try {
+    if (offset + 1 < view.byteLength) return view.getUint16(offset, true)
+    return 0
+  } catch {
+    return 0
+  }
 }
 
-function readU32LE(buf: Buffer, offset: number): number {
-  return offset + 3 < buf.length ? buf.readUInt32LE(offset) : 0
+function readU32LE(view: DataView, offset: number): number {
+  try {
+    if (offset + 3 < view.byteLength) return view.getUint32(offset, true)
+    return 0
+  } catch {
+    return 0
+  }
 }
 
-function calculateEntropy(data: Buffer): number {
+function readU64LE(view: DataView, offset: number): bigint {
+  try {
+    if (offset + 7 < view.byteLength) return view.getBigUint64(offset, true)
+    return BigInt(0)
+  } catch {
+    return BigInt(0)
+  }
+}
+
+function createDataView(arr: Uint8Array): DataView {
+  return new DataView(arr.buffer, arr.byteOffset, arr.byteLength)
+}
+
+function calculateEntropy(data: Uint8Array): number {
   if (!data || data.length === 0) return 0
   const freq = new Array(256).fill(0)
   for (let i = 0; i < data.length; i++) {
@@ -113,10 +136,10 @@ function calculateEntropy(data: Buffer): number {
   return Math.round(entropy * 100) / 100
 }
 
-function readAsciiString(buf: Buffer, offset: number, maxLen: number): string {
+function readAsciiString(data: Uint8Array, offset: number, maxLen: number): string {
   let str = ''
-  for (let i = 0; i < maxLen && offset + i < buf.length; i++) {
-    const byte = buf[offset + i]
+  for (let i = 0; i < maxLen && offset + i < data.length; i++) {
+    const byte = data[offset + i]
     if (byte === 0) break
     str += String.fromCharCode(byte)
   }
@@ -132,9 +155,17 @@ function rvaToOffset(rva: number, sections: PESection[]): number {
   return -1
 }
 
+function uint8ToHex(data: Uint8Array): string {
+  let hex = ''
+  for (let i = 0; i < data.length; i++) {
+    hex += data[i].toString(16).padStart(2, '0')
+  }
+  return hex
+}
+
 function decodeBase64(str: string): string {
   try {
-    return Buffer.from(str, 'base64').toString('utf-8')
+    return atob(str)
   } catch {
     return ''
   }
@@ -144,7 +175,11 @@ function decodeHex(str: string): string {
   try {
     const clean = str.replace(/[^0-9a-fA-F]/g, '')
     if (clean.length % 2 !== 0) return ''
-    return Buffer.from(clean, 'hex').toString('utf-8')
+    let result = ''
+    for (let i = 0; i < clean.length; i += 2) {
+      result += String.fromCharCode(parseInt(clean.substring(i, i + 2), 16))
+    }
+    return result
   } catch {
     return ''
   }
@@ -182,7 +217,7 @@ function decodeUnicodeEscapes(str: string): string {
   }
 }
 
-function extractStringsFromBuffer(buf: Buffer, minLen: number = 4): string[] {
+function extractStringsFromBuffer(buf: Uint8Array, minLen: number = 4): string[] {
   const strings: string[] = []
   let current = ''
   for (let i = 0; i < buf.length; i++) {
@@ -202,12 +237,20 @@ function extractStringsFromBuffer(buf: Buffer, minLen: number = 4): string[] {
   return strings
 }
 
+function safeSlice(data: Uint8Array, start: number, end: number): Uint8Array {
+  const s = Math.max(0, start)
+  const e = Math.min(data.length, end)
+  if (s >= e || s >= data.length) return new Uint8Array(0)
+  return data.slice(s, e)
+}
+
 // ============================================================
-// PE Parser
+// PE Parser (Edge-Compatible)
 // ============================================================
 
-function parsePE(raw: Buffer): PEInfo {
+function parsePE(raw: Uint8Array): PEInfo {
   const startTime = Date.now()
+  const view = createDataView(raw)
   const pe: PEInfo = {
     is_valid_pe: false,
     machine_type: 'Unknown',
@@ -231,7 +274,7 @@ function parsePE(raw: Buffer): PEInfo {
     return pe
   }
 
-  const peOffset = readU32LE(raw, 60)
+  const peOffset = readU32LE(view, 60)
   if (peOffset + 4 > raw.length) return pe
 
   // PE Signature check
@@ -244,7 +287,7 @@ function parsePE(raw: Buffer): PEInfo {
   const coffHeader = peOffset + 4
   if (coffHeader + 20 > raw.length) return pe
 
-  const machine = readU16LE(raw, coffHeader)
+  const machine = readU16LE(view, coffHeader)
   const machineTypes: Record<number, string> = {
     0x0: 'Unknown',
     0x14C: 'x86 (32-bit)',
@@ -254,28 +297,28 @@ function parsePE(raw: Buffer): PEInfo {
   }
   pe.machine_type = machineTypes[machine] || `Unknown (0x${machine.toString(16)})`
 
-  const numberOfSections = readU16LE(raw, coffHeader + 2)
-  const sizeOfOptionalHeader = readU16LE(raw, coffHeader + 16)
+  const numberOfSections = readU16LE(view, coffHeader + 2)
+  const sizeOfOptionalHeader = readU16LE(view, coffHeader + 16)
 
   // Optional Header
   const optHeader = coffHeader + 20
   if (optHeader + 2 > raw.length) return pe
 
-  const magic = readU16LE(raw, optHeader)
+  const magic = readU16LE(view, optHeader)
   const is64 = magic === 0x20B
 
   if (is64) {
-    pe.entry_point = readU32LE(raw, optHeader + 16)
-    pe.image_base = Number(raw.readBigUInt64LE(optHeader + 24))
+    pe.entry_point = readU32LE(view, optHeader + 16)
+    pe.image_base = Number(readU64LE(view, optHeader + 24))
   } else {
-    pe.entry_point = readU32LE(raw, optHeader + 16)
-    pe.image_base = readU32LE(raw, optHeader + 28)
+    pe.entry_point = readU32LE(view, optHeader + 16)
+    pe.image_base = readU32LE(view, optHeader + 28)
   }
 
   // Subsystem
   const subsystemOffset = optHeader + 68
   if (subsystemOffset + 2 <= raw.length) {
-    const subsystem = readU16LE(raw, subsystemOffset)
+    const subsystem = readU16LE(view, subsystemOffset)
     const subsystems: Record<number, string> = {
       1: 'Native',
       2: 'Windows GUI',
@@ -290,7 +333,7 @@ function parsePE(raw: Buffer): PEInfo {
   }
 
   // Compile timestamp
-  const timeDateStamp = readU32LE(raw, coffHeader + 4)
+  const timeDateStamp = readU32LE(view, coffHeader + 4)
   if (timeDateStamp > 0) {
     const date = new Date(timeDateStamp * 1000)
     if (date.getFullYear() >= 1990 && date.getFullYear() <= new Date().getFullYear() + 1) {
@@ -302,30 +345,30 @@ function parsePE(raw: Buffer): PEInfo {
   const dataDirStart = optHeader + (is64 ? 112 : 96)
 
   // Number of RVA and sizes
-  const numberOfRvaAndSizes = readU32LE(raw, dataDirStart - 4)
+  const numberOfRvaAndSizes = readU32LE(view, dataDirStart - 4)
 
   // Import directory RVA (index 1)
   let importRva = 0
   let importSize = 0
   if (numberOfRvaAndSizes > 1 && dataDirStart + 16 <= raw.length) {
-    importRva = readU32LE(raw, dataDirStart + 8)
-    importSize = readU32LE(raw, dataDirStart + 12)
+    importRva = readU32LE(view, dataDirStart + 8)
+    importSize = readU32LE(view, dataDirStart + 12)
   }
 
   // Export directory RVA (index 0)
   let exportRva = 0
   let exportSize = 0
   if (numberOfRvaAndSizes > 0 && dataDirStart + 8 <= raw.length) {
-    exportRva = readU32LE(raw, dataDirStart)
-    exportSize = readU32LE(raw, dataDirStart + 4)
+    exportRva = readU32LE(view, dataDirStart)
+    exportSize = readU32LE(view, dataDirStart + 4)
   }
 
   // Resource directory RVA (index 2)
   let resourceRva = 0
   let resourceSize = 0
   if (numberOfRvaAndSizes > 2 && dataDirStart + 24 <= raw.length) {
-    resourceRva = readU32LE(raw, dataDirStart + 16)
-    resourceSize = readU32LE(raw, dataDirStart + 20)
+    resourceRva = readU32LE(view, dataDirStart + 16)
+    resourceSize = readU32LE(view, dataDirStart + 20)
   }
 
   // Sections
@@ -337,14 +380,14 @@ function parsePE(raw: Buffer): PEInfo {
     if (secOff + 40 > raw.length) break
 
     const name = readAsciiString(raw, secOff, 8)
-    const virtualSize = readU32LE(raw, secOff + 8)
-    const virtualAddress = readU32LE(raw, secOff + 12)
-    const rawSize = readU32LE(raw, secOff + 16)
-    const rawOffset = readU32LE(raw, secOff + 20)
-    const characteristics = readU32LE(raw, secOff + 36)
+    const virtualSize = readU32LE(view, secOff + 8)
+    const virtualAddress = readU32LE(view, secOff + 12)
+    const rawSize = readU32LE(view, secOff + 16)
+    const rawOffset = readU32LE(view, secOff + 20)
+    const characteristics = readU32LE(view, secOff + 36)
 
     // Calculate entropy for this section
-    const secData = raw.slice(rawOffset, rawOffset + Math.min(rawSize, raw.length - rawOffset))
+    const secData = safeSlice(raw, rawOffset, rawOffset + Math.min(rawSize, raw.length - rawOffset))
     const entropy = calculateEntropy(secData)
 
     const flags: string[] = []
@@ -374,8 +417,8 @@ function parsePE(raw: Buffer): PEInfo {
   if (entrySection) {
     const entryOffset = rvaToOffset(pe.entry_point, pe.sections)
     if (entryOffset > 0 && entryOffset < raw.length) {
-      const entryBytes = raw.slice(entryOffset, Math.min(entryOffset + 16, raw.length))
-      const entryHex = entryBytes.toString('hex')
+      const entryBytes = safeSlice(raw, entryOffset, Math.min(entryOffset + 16, raw.length))
+      const entryHex = uint8ToHex(entryBytes)
       // Common pushad/mov patterns (packer signatures)
       if (entryHex.startsWith('60') || entryHex.startsWith('fc68') || entryHex.startsWith('e8') || entryHex.startsWith('bbe8')) {
         if (entrySection.entropy > 7.0) {
@@ -393,8 +436,8 @@ function parsePE(raw: Buffer): PEInfo {
         const descOff = importOffset + (i * 20)
         if (descOff + 20 > raw.length) break
 
-        const iltRva = readU32LE(raw, descOff)
-        const nameRva = readU32LE(raw, descOff + 12)
+        const iltRva = readU32LE(view, descOff)
+        const nameRva = readU32LE(view, descOff + 12)
 
         if (iltRva === 0 && nameRva === 0) break
 
@@ -411,7 +454,7 @@ function parsePE(raw: Buffer): PEInfo {
               if (funcEntryOff + (is64 ? 8 : 4) > raw.length) break
 
               if (is64) {
-                const entry = raw.readBigUInt64LE(funcEntryOff)
+                const entry = readU64LE(view, funcEntryOff)
                 if (entry === BigInt(0)) break
                 if (entry & BigInt(1)) {
                   const ordinal = Number(entry >> BigInt(32))
@@ -425,7 +468,7 @@ function parsePE(raw: Buffer): PEInfo {
                   }
                 }
               } else {
-                const entry = readU32LE(raw, funcEntryOff)
+                const entry = readU32LE(view, funcEntryOff)
                 if (entry === 0) break
                 if (entry & 1) {
                   functions.push(`Ordinal#${entry >> 16}`)
@@ -450,9 +493,9 @@ function parsePE(raw: Buffer): PEInfo {
   if (exportRva > 0 && exportSize > 0) {
     const exportOffset = rvaToOffset(exportRva, pe.sections)
     if (exportOffset > 0 && exportOffset + 40 <= raw.length) {
-      const numFunctions = readU32LE(raw, exportOffset + 20)
-      const numNames = readU32LE(raw, exportOffset + 24)
-      const namesRva = readU32LE(raw, exportOffset + 32)
+      const numFunctions = readU32LE(view, exportOffset + 20)
+      const numNames = readU32LE(view, exportOffset + 24)
+      const namesRva = readU32LE(view, exportOffset + 32)
 
       const namesOffset = rvaToOffset(namesRva, pe.sections)
       if (namesOffset > 0) {
@@ -460,7 +503,7 @@ function parsePE(raw: Buffer): PEInfo {
         for (let i = 0; i < maxNames; i++) {
           const namePtrOff = namesOffset + (i * 4)
           if (namePtrOff + 4 > raw.length) break
-          const nameRva = readU32LE(raw, namePtrOff)
+          const nameRva = readU32LE(view, namePtrOff)
           const nameOffset = rvaToOffset(nameRva, pe.sections)
           if (nameOffset > 0 && nameOffset < raw.length) {
             const name = readAsciiString(raw, nameOffset, 256)
@@ -472,50 +515,39 @@ function parsePE(raw: Buffer): PEInfo {
   }
 
   // Detect packers
-  const packerSignatures: Record<string, { sectionNames: string[]; check: (pe: PEInfo) => boolean }> = {
+  const packerSignatures: Record<string, { check: (p: PEInfo) => boolean }> = {
     'UPX': {
-      sectionNames: ['UPX0', 'UPX1', 'UPX2'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('UPX')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('UPX')),
     },
     'Themida/WinLicense': {
-      sectionNames: ['.themida'],
-      check: (pe) => pe.sections.some((s) => s.name.includes('themida') || s.name.includes('.vmp')),
+      check: (p) => p.sections.some((s) => s.name.includes('themida') || s.name.includes('.vmp')),
     },
     'VMProtect': {
-      sectionNames: ['.vmp0', '.vmp1'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('.vmp')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('.vmp')),
     },
     'ASPack': {
-      sectionNames: ['.aspack'],
-      check: (pe) => pe.sections.some((s) => s.name.includes('aspack')),
+      check: (p) => p.sections.some((s) => s.name.includes('aspack')),
     },
     'PECompact': {
-      sectionNames: ['.pec'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('.pec')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('.pec')),
     },
     'MPRESS': {
-      sectionNames: ['.MPRESS1', '.MPRESS2'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('.MPRESS')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('.MPRESS')),
     },
     'Armadillo': {
-      sectionNames: ['.adata'],
-      check: (pe) => pe.imports.some((imp) => imp.dll.includes('arm')),
+      check: (p) => p.imports.some((imp) => imp.dll.includes('arm')),
     },
     'Enigma Protector': {
-      sectionNames: ['.enigma1', '.enigma2'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('.enigma')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('.enigma')),
     },
     'Obsidium': {
-      sectionNames: ['.obsidium'],
-      check: (pe) => pe.sections.some((s) => s.name.includes('obsidium')),
+      check: (p) => p.sections.some((s) => s.name.includes('obsidium')),
     },
     'PEtite': {
-      sectionNames: ['.petite'],
-      check: (pe) => pe.sections.some((s) => s.name.includes('petite')),
+      check: (p) => p.sections.some((s) => s.name.includes('petite')),
     },
     'NSPack': {
-      sectionNames: ['.nsp0', '.nsp1'],
-      check: (pe) => pe.sections.some((s) => s.name.startsWith('.nsp')),
+      check: (p) => p.sections.some((s) => s.name.startsWith('.nsp')),
     },
   }
 
@@ -554,19 +586,17 @@ function parsePE(raw: Buffer): PEInfo {
       }
 
       try {
-        // Parse resource directory (simplified)
-        const numNamedTypes = readU16LE(raw, resOffset + 12)
-        const numIdTypes = readU16LE(raw, resOffset + 14)
+        const numNamedTypes = readU16LE(view, resOffset + 12)
+        const numIdTypes = readU16LE(view, resOffset + 14)
         const totalTypes = numNamedTypes + numIdTypes
 
         for (let i = 0; i < Math.min(totalTypes, 32); i++) {
           const entryOff = resOffset + 16 + (i * 8)
           if (entryOff + 8 > raw.length) break
 
-          const typeID = readU32LE(raw, entryOff)
+          const typeID = readU32LE(view, entryOff)
           const typeStr = resourceTypes[typeID] || `Type#${typeID}`
 
-          // Skip complex nesting - just note the type exists
           if (!pe.resources.some((r) => r.type === typeStr)) {
             pe.resources.push({ type: typeStr, name: 'Embedded', language: 'Neutral', size: 0 })
           }
@@ -585,7 +615,7 @@ function parsePE(raw: Buffer): PEInfo {
 // Binary String Engine (for EXE files)
 // ============================================================
 
-function binaryStringEngine(buf: Buffer): PatternMatch[] {
+function binaryStringEngine(buf: Uint8Array): PatternMatch[] {
   const matches: PatternMatch[] = []
   const strings = extractStringsFromBuffer(buf, 5)
 
@@ -1177,11 +1207,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: 'File size exceeds 50MB limit' }, { status: 400 })
     }
 
-    const fileBuffer = Buffer.from(await file.arrayBuffer())
+    const arrayBuffer = await file.arrayBuffer()
+    const rawBytes = new Uint8Array(arrayBuffer)
     const filename = file.name || 'unknown'
 
     const isEXE = /\.exe$/i.test(filename) ||
-      (fileBuffer.length > 2 && fileBuffer[0] === 0x4D && fileBuffer[1] === 0x5A)
+      (rawBytes.length > 2 && rawBytes[0] === 0x4D && rawBytes[1] === 0x5A)
 
     // Send webhook notification (filename only)
     try {
@@ -1200,16 +1231,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let result: VirusResult
 
     if (isEXE) {
-      // === EXE File Path ===
-      const peInfo = parsePE(fileBuffer)
-      const patterns = binaryStringEngine(fileBuffer)
+      // === EXE File Path (Edge-Compatible) ===
+      const peInfo = parsePE(rawBytes)
+      const patterns = binaryStringEngine(rawBytes)
       const obfuscation: ObfuscationReport = {
         is_obfuscated: peInfo.detected_packer.length > 0,
         confidence: peInfo.detected_packer.length > 0 ? 80 : 0,
         layers: peInfo.detected_packer.length,
         techniques: [...peInfo.detected_packer],
-        decoded_size: fileBuffer.length,
-        original_size: fileBuffer.length,
+        decoded_size: rawBytes.length,
+        original_size: rawBytes.length,
       }
       const heuristicScore = heuristicAnalyze('', obfuscation, patterns, peInfo)
       const detailedAnalysis = buildDetailedAnalysis(filename, '', obfuscation, patterns, peInfo, heuristicScore)
@@ -1217,7 +1248,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       result = combineAllResults(filename, '', obfuscation, patterns, peInfo, heuristicScore, detailedAnalysis)
     } else {
       // === Source Code / Text File Path ===
-      const content = fileBuffer.toString('utf-8')
+      const decoder = new TextDecoder('utf-8')
+      const content = decoder.decode(rawBytes)
       const obfuscation = detectObfuscation(content)
       const patterns = patternEngineAnalyze(content, obfuscation)
       const heuristicScore = heuristicAnalyze(content, obfuscation, patterns, null)
