@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
+import { rateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 import { sendToWebhook } from '@/lib/webhook'
-
-export const runtime = 'nodejs'
-export const maxDuration = 60
 
 // ============================================================
 // Interfaces
@@ -375,7 +372,6 @@ function parsePE(raw: Buffer): PEInfo {
     (sec) => pe.entry_point >= sec.virtual_address && pe.entry_point < sec.virtual_address + sec.virtual_size
   )
   if (entrySection) {
-    const entryRVA = pe.entry_point - entrySection.virtual_address
     const entryOffset = rvaToOffset(pe.entry_point, pe.sections)
     if (entryOffset > 0 && entryOffset < raw.length) {
       const entryBytes = raw.slice(entryOffset, Math.min(entryOffset + 16, raw.length))
@@ -1160,7 +1156,7 @@ function combineAllResults(
 // Main Handler
 // ============================================================
 
-export async function handleVirusScan(req: NextRequest): Promise<NextResponse> {
+export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const rateLimitResult = rateLimit(req, RATE_LIMITS.virusScan)
     if (rateLimitResult) return rateLimitResult
