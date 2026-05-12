@@ -3915,6 +3915,21 @@ function VisitorCounter() {
 
   useEffect(() => {
     setMounted(true)
+    // تسجيل زيارة فريدة - فقط أول مرة لكل مستخدم
+    const counted = localStorage.getItem('trj_visit_counted')
+    if (!counted) {
+      fetch('/api/visitor-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'visit' }) })
+        .then(r => r.json())
+        .then(d => {
+          if (d.success) {
+            setVisitorTotal(d.total)
+            // وضع علامة أنه تم التسجيل (تنتهي بعد 24 ساعة)
+            localStorage.setItem('trj_visit_counted', Date.now().toString())
+          }
+        })
+        .catch(() => {})
+    }
+    // قراءة العدد بدون زيادة
     const fetchCount = () => {
       fetch('/api/visitor-count').then(r => r.json()).then(d => {
         if (d.success) setVisitorTotal(d.total)
@@ -3922,6 +3937,14 @@ function VisitorCounter() {
     }
     fetchCount()
     const refresh = setInterval(fetchCount, 60000)
+    // إزالة علامة التسجيل بعد 24 ساعة حتى يتم إعادة العد في اليوم التالي
+    const saved = localStorage.getItem('trj_visit_counted')
+    if (saved) {
+      const elapsed = Date.now() - parseInt(saved)
+      if (elapsed > 86400000) {
+        localStorage.removeItem('trj_visit_counted')
+      }
+    }
     return () => { clearInterval(refresh) }
   }, [])
 
@@ -3931,7 +3954,7 @@ function VisitorCounter() {
     <div className="fixed bottom-20 right-3 sm:bottom-4 sm:right-4 z-[90]">
       <div className="bg-black/50 backdrop-blur-xl border border-white/[0.1] rounded-2xl px-3 py-2 flex items-center gap-2 shadow-xl shadow-black/30 hover:bg-black/60 transition-all cursor-default">
         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-        <span className="text-[11px] font-bold text-white/80">👁 {visitorTotal.toLocaleString()} زيارة</span>
+        <span className="text-[11px] font-bold text-white/80">👁 {visitorTotal.toLocaleString()} زائر</span>
       </div>
     </div>
   )
