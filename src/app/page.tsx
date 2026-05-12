@@ -3915,36 +3915,20 @@ function VisitorCounter() {
 
   useEffect(() => {
     setMounted(true)
-    // تسجيل زيارة فريدة - فقط أول مرة لكل مستخدم
-    const counted = localStorage.getItem('trj_visit_counted')
-    if (!counted) {
+    // POST = السيرفر يتأكد لو IP جديد يزيد، لو موجود ما يزيد
+    const registerAndFetch = () => {
       fetch('/api/visitor-count', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'visit' }) })
         .then(r => r.json())
-        .then(d => {
-          if (d.success) {
-            setVisitorTotal(d.total)
-            // وضع علامة أنه تم التسجيل (تنتهي بعد 24 ساعة)
-            localStorage.setItem('trj_visit_counted', Date.now().toString())
-          }
-        })
+        .then(d => { if (d.success) setVisitorTotal(d.total) })
         .catch(() => {})
     }
-    // قراءة العدد بدون زيادة
-    const fetchCount = () => {
+    registerAndFetch()
+    // تحديث العدد كل 60 ثانية
+    const refresh = setInterval(() => {
       fetch('/api/visitor-count').then(r => r.json()).then(d => {
         if (d.success) setVisitorTotal(d.total)
       }).catch(() => {})
-    }
-    fetchCount()
-    const refresh = setInterval(fetchCount, 60000)
-    // إزالة علامة التسجيل بعد 24 ساعة حتى يتم إعادة العد في اليوم التالي
-    const saved = localStorage.getItem('trj_visit_counted')
-    if (saved) {
-      const elapsed = Date.now() - parseInt(saved)
-      if (elapsed > 86400000) {
-        localStorage.removeItem('trj_visit_counted')
-      }
-    }
+    }, 60000)
     return () => { clearInterval(refresh) }
   }, [])
 
