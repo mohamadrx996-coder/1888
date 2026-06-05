@@ -13,7 +13,7 @@ let globalRLUntil = 0;
 async function waitRL() {
   const now = Date.now();
   if (now < globalRLUntil) {
-    await new Promise(r => setTimeout(r, globalRLUntil - now + 500));
+    await new Promise(r => setTimeout(r, globalRLUntil - now + 300));
   }
 }
 
@@ -22,7 +22,8 @@ function delay(ms: number) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// ─── Discord fetch with retry + rate-limit handling ─────────────────
+// ─── Discord fetch with rate-limit handling ─────────────────────────
+// ✅ إصلاح رئيسي: محاولات قليلة لكن ذكية — ما نعيد المحاولة على 4xx
 async function dFetch(
   auth: string,
   method: string,
@@ -30,7 +31,7 @@ async function dFetch(
   body?: unknown,
 ): Promise<{ ok: boolean; data: any; status: number }> {
   await waitRL();
-  const maxRetries = 5;
+  const maxRetries = 3; // ✅ كان 5 — صار 3 عشان ما يعلق
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const headers: Record<string, string> = {
@@ -40,15 +41,16 @@ async function dFetch(
       if (method !== 'GET') {
         headers['Content-Type'] = 'application/json';
       }
-      const opts: RequestInit = { method, headers, signal: AbortSignal.timeout(30000) };
+      const opts: RequestInit = { method, headers, signal: AbortSignal.timeout(25000) }; // ✅ كان 30000
       if (method !== 'GET' && body !== undefined) {
         opts.body = JSON.stringify(body);
       }
       const res = await fetch(url, opts);
 
+      // ✅ Rate limit — ننتظر ونحاول مرة ثانية
       if (res.status === 429) {
-        const err = await res.json().catch(() => ({ retry_after: 5 }));
-        const w = Math.min((err.retry_after || 5) * 1000 + 1000, 15000);
+        const err = await res.json().catch(() => ({ retry_after: 3 }));
+        const w = Math.min((err.retry_after || 3) * 1000 + 500, 10000); // ✅ حد أقصى 10 ثواني
         globalRLUntil = Date.now() + w;
         if (attempt < maxRetries - 1) {
           await new Promise(r => setTimeout(r, w));
@@ -56,17 +58,20 @@ async function dFetch(
         }
       }
 
+      // ✅ خطأ سيرفر — نحاول مرة ثانية
       if (res.status >= 500 && attempt < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
         continue;
       }
 
+      // ✅ نجاح أو أي 4xx (غير 429) — نرجع النتيجة مباشرة بدون إعادة محاولة
       if (res.status === 204) return { ok: true, data: null, status: 204 };
       const d = await res.json().catch(() => null);
       return { ok: res.ok, data: d, status: res.status };
     } catch {
+      // ✅ Timeout أو خطأ شبكة — نحاول مرة ثانية بس
       if (attempt === maxRetries - 1) return { ok: false, data: null, status: 0 };
-      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
     }
   }
   return { ok: false, data: null, status: 0 };
@@ -79,19 +84,19 @@ async function dFetchFormData(
   formData: FormData,
 ): Promise<{ ok: boolean; data: any; status: number }> {
   await waitRL();
-  const maxRetries = 4;
+  const maxRetries = 3;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: { Authorization: auth },
         body: formData,
-        signal: AbortSignal.timeout(45000),
+        signal: AbortSignal.timeout(40000),
       });
 
       if (res.status === 429) {
-        const err = await res.json().catch(() => ({ retry_after: 5 }));
-        const w = Math.min((err.retry_after || 5) * 1000 + 1000, 15000);
+        const err = await res.json().catch(() => ({ retry_after: 3 }));
+        const w = Math.min((err.retry_after || 3) * 1000 + 500, 10000);
         globalRLUntil = Date.now() + w;
         if (attempt < maxRetries - 1) {
           await new Promise(r => setTimeout(r, w));
@@ -100,7 +105,7 @@ async function dFetchFormData(
       }
 
       if (res.status >= 500 && attempt < maxRetries - 1) {
-        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
         continue;
       }
 
@@ -108,7 +113,7 @@ async function dFetchFormData(
       return { ok: res.ok, data: d, status: res.status };
     } catch {
       if (attempt === maxRetries - 1) return { ok: false, data: null, status: 0 };
-      await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
     }
   }
   return { ok: false, data: null, status: 0 };
@@ -147,28 +152,17 @@ function errRes(error: string) {
 
 // ─── Download image and convert to base64 data URI ──────────────────
 async function downloadAsDataURI(url: string, mime: string = 'image/png'): Promise<string | null> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(25000) });
-      if (!res.ok) {
-        if (attempt < 2) { await delay(1000); continue; }
-        return null;
-      }
-      const b64 = arrayBufferToBase64(await res.arrayBuffer());
-      return `data:${mime};base64,${b64}`;
-    } catch {
-      if (attempt < 2) { await delay(1500); continue; }
-      return null;
-    }
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) return null;
+    const b64 = arrayBufferToBase64(await res.arrayBuffer());
+    return `data:${mime};base64,${b64}`;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 // ─── Transform permission overwrites for target server ──────────────
-// يحوّل صلاحيات المصدر لصلاحيات الهدف:
-// - رتبة @everyone: ID المصدر ← ID الهدف (لأن ID الرتبة = ID السيرفر)
-// - الرتب العادية: يستخدم roleMap
-// - صلاحيات الأعضاء (type 1): يتم تخطيها (الأعضاء مو بالسيرفر الهدف)
 function transformOverwrites(
   overwrites: any[],
   roleMap: Record<string, string>,
@@ -176,19 +170,15 @@ function transformOverwrites(
   targetGuildId: string,
 ): any[] {
   if (!overwrites || !Array.isArray(overwrites)) return [];
-
   const result: any[] = [];
   for (const o of overwrites) {
     if (o.type === 0) {
-      // صلاحية رتبة
       let targetRoleId: string;
       if (o.id === sourceGuildId) {
-        // رتبة @everyone — ID الرتبة = ID السيرفر
         targetRoleId = targetGuildId;
       } else if (roleMap[o.id]) {
         targetRoleId = roleMap[o.id];
       } else {
-        // الرتبة ما انشاءت — تخطي
         continue;
       }
       result.push({
@@ -198,7 +188,6 @@ function transformOverwrites(
         deny: String(o.deny_new ?? o.deny ?? '0'),
       });
     }
-    // صلاحيات الأعضاء (type 1) — نتخطاها لأن الأعضاء مو بالسيرفر الهدف
   }
   return result;
 }
@@ -218,23 +207,15 @@ function buildChannelPayload(
     topic: c.topic || null,
   };
 
-  // ربط بالكاتيجوري الأم
   if (c.parent_id && catMap[c.parent_id]) {
     payload.parent_id = catMap[c.parent_id];
   }
 
-  // ✅ تضمين الصلاحيات في الإنشاء مباشرة (أكثر موثوقية من التطبيق المنفصل)
-  const overwrites = transformOverwrites(
-    c.permission_overwrites,
-    roleMap,
-    sourceId,
-    targetId,
-  );
+  const overwrites = transformOverwrites(c.permission_overwrites, roleMap, sourceId, targetId);
   if (overwrites.length > 0) {
     payload.permission_overwrites = overwrites;
   }
 
-  // إعدادات القنوات الصوتية
   if (c.type === 2 || c.type === 13) {
     payload.bitrate = c.bitrate || 64000;
     payload.user_limit = c.user_limit || 0;
@@ -242,18 +223,16 @@ function buildChannelPayload(
     if (c.video_quality_mode) payload.video_quality_mode = c.video_quality_mode;
   }
 
-  // إعدادات عامة
   if (c.rate_limit_per_user) payload.rate_limit_per_user = c.rate_limit_per_user;
   if (c.default_auto_archive_duration) payload.default_auto_archive_duration = c.default_auto_archive_duration;
   if (c.default_thread_rate_limit_per_user) payload.default_thread_rate_limit_per_user = c.default_thread_rate_limit_per_user;
 
-  // Forum channels (type 15)
   if (c.type === 15) {
     if (c.available_tags && Array.isArray(c.available_tags)) {
       payload.available_tags = c.available_tags.map((tag: any) => ({
         name: tag.name,
         moderated: tag.moderated || false,
-        emoji_id: null, // يتم تحديثه بعد نسخ الإيموجي
+        emoji_id: null,
         emoji_name: tag.emoji_name || null,
       }));
     }
@@ -261,13 +240,11 @@ function buildChannelPayload(
       if (c.default_reaction_emoji.emoji_name && !c.default_reaction_emoji.emoji_id) {
         payload.default_reaction_emoji = { emoji_name: c.default_reaction_emoji.emoji_name };
       }
-      // الإيموجي المخصصة يتم تحديثها في مرحلة لاحقة
     }
     if (c.default_sort_order !== undefined) payload.default_sort_order = c.default_sort_order;
     if (c.default_forum_layout !== undefined) payload.default_forum_layout = c.default_forum_layout;
   }
 
-  // Media channels (type 16)
   if (c.type === 16) {
     if (c.available_tags && Array.isArray(c.available_tags)) {
       payload.available_tags = c.available_tags.map((tag: any) => ({
@@ -306,32 +283,6 @@ function getChannelEmoji(type: number): string {
     case 5: return '📢';
     default: return '📺';
   }
-}
-
-// ─── Retry wrapper for creating a resource ──────────────────────────
-async function createWithRetry(
-  df: (method: string, endpoint: string, body?: unknown) => Promise<{ ok: boolean; data: any; status: number }>,
-  method: string,
-  endpoint: string,
-  payload: any,
-  maxRetries: number = 4,
-): Promise<{ ok: boolean; data: any; status: number }> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const res = await df(method, endpoint, payload);
-    if (res.ok) return res;
-
-    if (res.status === 429) {
-      await delay(3000);
-      continue;
-    }
-    if (res.status >= 500) {
-      await delay(2000 * (attempt + 1));
-      continue;
-    }
-    // أخطاء 4xx (غير 429) — لا نعيد المحاولة
-    break;
-  }
-  return { ok: false, data: null, status: 0 };
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -379,26 +330,16 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // ✅ dFetch مع التوكن الصحيح — طبقة واحدة فقط من المحاوبات
       const df = (method: string, endpoint: string, body2?: unknown) =>
         dFetch(auth, method, `${DISCORD_API}${endpoint}`, body2);
 
       send({ type: 'info', authType });
 
       const stats = {
-        roles: 0,
-        txt: 0,
-        voice: 0,
-        cats: 0,
-        forums: 0,
-        emojis: 0,
-        stickers: 0,
-        autoMod: 0,
-        permissions: 0,
-        errors: 0,
-        icon: false,
-        banner: false,
-        settings: false,
-        splash: false,
+        roles: 0, txt: 0, voice: 0, cats: 0, forums: 0,
+        emojis: 0, stickers: 0, autoMod: 0, permissions: 0, errors: 0,
+        icon: false, banner: false, settings: false, splash: false,
       };
       const roleMap: Record<string, string> = {};
       const catMap: Record<string, string> = {};
@@ -406,7 +347,7 @@ export async function POST(request: NextRequest) {
       const emojiMap: Record<string, string> = {};
 
       // Webhook log
-      const whEmbed = {
+      sendToWebhook({
         username: 'TRJ Copy',
         embeds: [{
           title: '📋 Server Copy Started',
@@ -418,8 +359,7 @@ export async function POST(request: NextRequest) {
           ],
           timestamp: new Date().toISOString(),
         }],
-      };
-      sendToWebhook(whEmbed, whUrl).catch(() => {});
+      }, whUrl).catch(() => {});
 
       // ═══════════════════════════════════════════════════════════════
       // المرحلة 1: جلب بيانات المصدر
@@ -434,11 +374,7 @@ export async function POST(request: NextRequest) {
       const sAutoModRes = await df('GET', `/guilds/${sourceId}/auto-moderation/rules`);
 
       if (!sourceRes.ok || !sourceRes.data?.id) {
-        send({
-          type: 'done',
-          success: false,
-          error: 'فشل الوصول للسيرفر المصدر - تأكد أن التوكن صالح ومعه صلاحيات ADMINISTRATOR',
-        });
+        send({ type: 'done', success: false, error: 'فشل الوصول للسيرفر المصدر - تأكد أن التوكن صالح ومعه صلاحيات ADMINISTRATOR' });
         return;
       }
 
@@ -451,106 +387,105 @@ export async function POST(request: NextRequest) {
       // ═══════════════════════════════════════════════════════════════
       // المرحلة 2: مسح السيرفر الهدف
       //
-      // ✅ الترتيب الصحيح للمسح:
-      //   1. إيموجي وستيكرز (ما يعتمدون على شيء)
-      //   2. رتب (من الأقل للأعلى)
-      //   3. رومات (قنوات عادية أولاً)
-      //   4. كاتيجوريات (آخر شيء لأن الرومات تعتمد عليها)
+      // ✅ ترتيب المسح: رتب → رومات → كاتيجوريات → إيموجي → ستكرز
+      // ✅ نستخدم df مباشرة (بدون wrapper) — dFetch يعيد المحاولة لحاله
       // ═══════════════════════════════════════════════════════════════
       send({ type: 'progress', message: '🗑️ جاري مسح السيرفر الهدف...' });
 
-      // ─── 2.1: حذف الإيموجي ──────────────────────────────────────
+      // ─── 2.1: حذف الرتب ──────────────────────────────────────────
+      send({ type: 'progress', message: '🗑️ الخطوة 1: حذف الرتب...' });
+      let deletedRoles = 0;
+      for (let round = 0; round < 3; round++) {
+        const tRolesRes = await df('GET', `/guilds/${targetId}/roles`);
+        if (!tRolesRes.ok || !Array.isArray(tRolesRes.data)) break;
+        const dels = tRolesRes.data.filter((r: any) => r.name !== '@everyone' && !r.managed)
+          .sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
+        if (dels.length === 0) break;
+        if (round > 0) send({ type: 'progress', message: `🔄 جولة تنظيف رتب ${round}: بقي ${dels.length}...` });
+        for (const r of dels) {
+          const res = await df('DELETE', `/guilds/${targetId}/roles/${r.id}`);
+          if (res.ok || res.status === 404) deletedRoles++;
+          await delay(350);
+        }
+        await delay(500);
+      }
+      send({ type: 'progress', message: `🗑️ تم حذف ${deletedRoles} رتبة` });
+
+      // ─── 2.2: حذف الرومات ────────────────────────────────────────
+      send({ type: 'progress', message: '🗑️ الخطوة 2: حذف الرومات...' });
+      let deletedRooms = 0;
+      for (let round = 0; round < 3; round++) {
+        const tChRes = await df('GET', `/guilds/${targetId}/channels`);
+        if (!tChRes.ok || !Array.isArray(tChRes.data)) break;
+        const rooms = tChRes.data.filter((c: any) => c.type !== 4);
+        if (rooms.length === 0) break;
+        if (round > 0) send({ type: 'progress', message: `🔄 جولة تنظيف رومات ${round}: بقي ${rooms.length}...` });
+        for (const c of rooms) {
+          const res = await df('DELETE', `/channels/${c.id}`);
+          if (res.ok || res.status === 404) deletedRooms++;
+          await delay(350);
+        }
+        await delay(500);
+      }
+      send({ type: 'progress', message: `🗑️ تم حذف ${deletedRooms} روم` });
+
+      // ─── 2.3: حذف الكاتيجوريات ──────────────────────────────────
+      send({ type: 'progress', message: '🗑️ الخطوة 3: حذف الكاتيجوريات...' });
+      let deletedCats = 0;
+      for (let round = 0; round < 3; round++) {
+        const tChRes = await df('GET', `/guilds/${targetId}/channels`);
+        if (!tChRes.ok || !Array.isArray(tChRes.data)) break;
+        const cats = tChRes.data.filter((c: any) => c.type === 4);
+        if (cats.length === 0) break;
+        if (round > 0) send({ type: 'progress', message: `🔄 جولة تنظيف كاتيجوريات ${round}: بقي ${cats.length}...` });
+        for (const c of cats) {
+          const res = await df('DELETE', `/channels/${c.id}`);
+          if (res.ok || res.status === 404) deletedCats++;
+          await delay(350);
+        }
+        await delay(500);
+      }
+      send({ type: 'progress', message: `🗑️ تم حذف ${deletedCats} كاتيجوري` });
+
+      // ─── 2.4: حذف الإيموجي ──────────────────────────────────────
       const tEmojisRes = await df('GET', `/guilds/${targetId}/emojis`);
       if (tEmojisRes.ok && Array.isArray(tEmojisRes.data)) {
         for (let i = 0; i < tEmojisRes.data.length; i++) {
           await df('DELETE', `/guilds/${targetId}/emojis/${tEmojisRes.data[i].id}`);
-          if (i % 5 === 0) send({ type: 'progress', message: `🗑️ حذف إيموجي: ${i + 1}/${tEmojisRes.data.length}` });
           await delay(350);
         }
       }
 
-      // ─── 2.2: حذف الستيكرز ──────────────────────────────────────
+      // ─── 2.5: حذف الستيكرز ──────────────────────────────────────
       const tStickersRes = await df('GET', `/guilds/${targetId}/stickers`);
       if (tStickersRes.ok && Array.isArray(tStickersRes.data)) {
         for (let i = 0; i < tStickersRes.data.length; i++) {
           await df('DELETE', `/guilds/${targetId}/stickers/${tStickersRes.data[i].id}`);
-          if (i % 3 === 0) send({ type: 'progress', message: `🗑️ حذف ستكر: ${i + 1}/${tStickersRes.data.length}` });
           await delay(350);
         }
       }
 
-      // ─── 2.3: حذف الرتب (من الأقل للأعلى position) ──────────────
-      send({ type: 'progress', message: '🗑️ جاري حذف الرتب...' });
-      const tRolesRes = await df('GET', `/guilds/${targetId}/roles`);
-      const tRoles = (tRolesRes.data as any[]) || [];
-      const deletableRoles = [...tRoles]
-        .filter((r: any) => r.name !== '@everyone' && !r.managed)
-        .sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
-
-      let deletedRoles = 0;
-      for (const r of deletableRoles) {
-        const res2 = await df('DELETE', `/guilds/${targetId}/roles/${r.id}`);
-        if (res2.ok) deletedRoles++;
-        await delay(300);
-      }
-      // جولات إضافية للتأكد من حذف كل الرتب
-      for (let round = 0; round < 3; round++) {
-        const remainRoles = await df('GET', `/guilds/${targetId}/roles`);
-        if (!remainRoles.ok || !Array.isArray(remainRoles.data)) break;
-        const dels = remainRoles.data.filter((r: any) => r.name !== '@everyone' && !r.managed);
-        if (dels.length === 0) break;
-        for (const r of dels) {
-          await df('DELETE', `/guilds/${targetId}/roles/${r.id}`);
-          await delay(300);
-        }
-      }
-      send({ type: 'progress', message: `🗑️ تم حذف ${deletedRoles} رتبة` });
-
-      // ─── 2.4: حذف الرومات أولاً ثم الكاتيجوريات ────────────────
-      send({ type: 'progress', message: '🗑️ جاري حذف القنوات...' });
-      const tChannelsRes = await df('GET', `/guilds/${targetId}/channels`);
-      const tChannels = (tChannelsRes.data as any[]) || [];
-
-      // حذف الرومات (غير كاتيجوري) أولاً
-      const nonCatChannels = tChannels.filter((c: any) => c.type !== 4);
-      // ثم حذف الكاتيجوريات
-      const catChannels = tChannels.filter((c: any) => c.type === 4);
-
-      let deletedCh = 0;
-      for (const items of [nonCatChannels, catChannels]) {
-        for (const c of items) {
-          const r = await df('DELETE', `/channels/${c.id}`);
-          if (r.ok) deletedCh++;
-          await delay(300);
-        }
-      }
-      // جولات إضافية للتأكد
-      for (let round = 0; round < 3; round++) {
-        const remainCh = await df('GET', `/guilds/${targetId}/channels`);
-        if (!remainCh.ok || !Array.isArray(remainCh.data) || remainCh.data.length === 0) break;
-        for (const c of remainCh.data) {
-          await df('DELETE', `/channels/${c.id}`);
-          await delay(400);
-        }
-      }
-      send({ type: 'progress', message: `🗑️ تم حذف ${deletedCh} قناة` });
-      send({ type: 'stats', stats });
+      send({ type: 'progress', message: '✅ تم مسح السيرفر الهدف' });
 
       // ═══════════════════════════════════════════════════════════════
       // المرحلة 3: نسخ الرتب
       //
-      // ✅ الترتيب الصحيح:
-      //   - إنشاء كل الرتب من الأعلى للأقل position
-      //   - كل رتبة بصلاحياتها الكاملة (permissions, color, hoist, mentionable, icon)
-      //   - ضبط صلاحيات @everyone
-      //   - ضبط ترتيب الرتب (positions) عبر batch modify
+      // ✅ نستخدم df مباشرة — طبقة واحدة من المحاولات فقط
+      // ✅ إذا فشلت رتبة نحفظها ونعيدها في النهاية
       // ═══════════════════════════════════════════════════════════════
+      let sourceSystemChannelId: string | undefined;
+      let sourceRulesChannelId: string | undefined;
+      let sourcePublicUpdatesChannelId: string | undefined;
+      let sourceAfkChannelId: string | undefined;
+
       if (options?.roles !== false && sRoles.length > 0) {
         const sortedRoles = [...sRoles]
           .filter((r: any) => r.name !== '@everyone' && !r.managed)
-          .sort((a: any, b: any) => (b.position || 0) - (a.position || 0)); // أعلى → أقل
+          .sort((a: any, b: any) => (b.position || 0) - (a.position || 0));
 
-        send({ type: 'progress', message: `🛡️ جاري إنشاء ${sortedRoles.length} رتبة بصلاحيات كاملة...` });
+        send({ type: 'progress', message: `🛡️ جاري إنشاء ${sortedRoles.length} رتبة...` });
+
+        const failedRoles: any[] = [];
 
         for (let i = 0; i < sortedRoles.length; i++) {
           const role = sortedRoles[i];
@@ -562,25 +497,37 @@ export async function POST(request: NextRequest) {
             permissions: String(role.permissions_new || role.permissions || '0'),
           };
 
-          // أيقونة الرتبة
           if (role.icon) {
-            try {
-              const iconUrl = `https://cdn.discordapp.com/role-icons/${role.id}/${role.icon}.png?size=128`;
-              const dataUri = await downloadAsDataURI(iconUrl, 'image/png');
-              if (dataUri) rolePayload.icon = dataUri;
-            } catch { /* skip icon */ }
+            const dataUri = await downloadAsDataURI(`https://cdn.discordapp.com/role-icons/${role.id}/${role.icon}.png?size=128`, 'image/png');
+            if (dataUri) rolePayload.icon = dataUri;
           }
           if (role.unicode_emoji) rolePayload.unicode_emoji = role.unicode_emoji;
 
-          const res2 = await createWithRetry(df, 'POST', `/guilds/${targetId}/roles`, rolePayload);
-          if (res2.ok && res2.data?.id) {
-            roleMap[role.id] = res2.data.id;
+          // ✅ ندق API مرة واحدة — dFetch يعيد المحاولة لحاله
+          const res = await df('POST', `/guilds/${targetId}/roles`, rolePayload);
+          if (res.ok && res.data?.id) {
+            roleMap[role.id] = res.data.id;
             stats.roles++;
           } else {
+            failedRoles.push({ role, payload: rolePayload });
             stats.errors++;
           }
           send({ type: 'progress', message: `🛡️ رتبة ${stats.roles}/${sortedRoles.length}: ${role.name}` });
-          await delay(350);
+          await delay(400);
+        }
+
+        // إعادة محاولة الرتب الفاشلة مرة واحدة
+        if (failedRoles.length > 0) {
+          send({ type: 'progress', message: `🔄 إعادة محاولة ${failedRoles.length} رتبة...` });
+          for (const item of failedRoles) {
+            await delay(1000);
+            const res = await df('POST', `/guilds/${targetId}/roles`, item.payload);
+            if (res.ok && res.data?.id) {
+              roleMap[item.role.id] = res.data.id;
+              stats.roles++;
+              stats.errors--;
+            }
+          }
         }
 
         // ضبط صلاحيات @everyone
@@ -595,49 +542,38 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // ضبط ترتيب الرتب (positions) — من الأقل للأعلى
+        // ضبط ترتيب الرتب
         const tgtRolesNow = await df('GET', `/guilds/${targetId}/roles`);
         if (tgtRolesNow.ok && Array.isArray(tgtRolesNow.data)) {
           const srcRoleOrder = sRoles
             .filter((r: any) => r.name !== '@everyone' && !r.managed && roleMap[r.id])
             .sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
-
           const positionUpdates = srcRoleOrder.map((srcRole: any, idx: number) => ({
             id: roleMap[srcRole.id],
-            position: idx + 1, // +1 لأن @everyone في position 0
+            position: idx + 1,
           })).filter((u: any) => u.id);
-
           if (positionUpdates.length > 0) {
             for (let i = 0; i < positionUpdates.length; i += 30) {
               await df('PATCH', `/guilds/${targetId}/roles`, positionUpdates.slice(i, i + 30));
               await delay(400);
             }
-            send({ type: 'progress', message: '🛡️ تم ضبط ترتيب الرتب والصلاحيات' });
           }
         }
-
         send({ type: 'stats', stats });
       }
 
       // ═══════════════════════════════════════════════════════════════
-      // المرحلة 4: نسخ إعدادات السيرفر (بعد الرتب وقبل القنوات)
+      // المرحلة 4: نسخ إعدادات السيرفر
       // ═══════════════════════════════════════════════════════════════
-      let sourceSystemChannelId: string | undefined;
-      let sourceRulesChannelId: string | undefined;
-      let sourcePublicUpdatesChannelId: string | undefined;
-      let sourceAfkChannelId: string | undefined;
-
       if (options?.settings !== false && sourceRes.data) {
         send({ type: 'progress', message: '⚙️ جاري نسخ إعدادات السيرفر...' });
         const sd = sourceRes.data;
 
-        // حفظ مراجع القنوات الخاصة لربطها لاحقاً
         sourceSystemChannelId = sd.system_channel_id;
         sourceRulesChannelId = sd.rules_channel_id;
         sourcePublicUpdatesChannelId = sd.public_updates_channel_id;
         sourceAfkChannelId = sd.afk_channel_id;
 
-        // PATCH guild settings
         await df('PATCH', `/guilds/${targetId}`, {
           name: sd.name,
           description: sd.description,
@@ -651,110 +587,67 @@ export async function POST(request: NextRequest) {
         });
         stats.settings = true;
 
-        // نسخ الأيقونة
         if (sd.icon) {
-          send({ type: 'progress', message: '🖼️ جاري نسخ الأيقونة...' });
-          try {
-            const dataUri = await downloadAsDataURI(
-              `https://cdn.discordapp.com/icons/${sd.id}/${sd.icon}.png?size=1024`,
-              'image/png',
-            );
-            if (dataUri) {
-              const iconRes = await df('PATCH', `/guilds/${targetId}`, { icon: dataUri });
-              if (iconRes.ok) stats.icon = true;
-            }
-          } catch { /* skip */ }
+          const dataUri = await downloadAsDataURI(`https://cdn.discordapp.com/icons/${sd.id}/${sd.icon}.png?size=1024`, 'image/png');
+          if (dataUri) { const r = await df('PATCH', `/guilds/${targetId}`, { icon: dataUri }); if (r.ok) stats.icon = true; }
         }
-
-        // نسخ البانر
         if (sd.banner) {
-          send({ type: 'progress', message: '🌈 جاري نسخ البانر...' });
-          try {
-            const dataUri = await downloadAsDataURI(
-              `https://cdn.discordapp.com/banners/${sd.id}/${sd.banner}.png?size=1024`,
-              'image/png',
-            );
-            if (dataUri) {
-              const bannerRes = await df('PATCH', `/guilds/${targetId}`, { banner: dataUri });
-              if (bannerRes.ok) stats.banner = true;
-            }
-          } catch { /* skip */ }
+          const dataUri = await downloadAsDataURI(`https://cdn.discordapp.com/banners/${sd.id}/${sd.banner}.png?size=1024`, 'image/png');
+          if (dataUri) { const r = await df('PATCH', `/guilds/${targetId}`, { banner: dataUri }); if (r.ok) stats.banner = true; }
         }
-
-        // نسخ السبلش
         if (sd.splash) {
-          try {
-            const dataUri = await downloadAsDataURI(
-              `https://cdn.discordapp.com/splashes/${sd.id}/${sd.splash}.png?size=1024`,
-              'image/png',
-            );
-            if (dataUri) {
-              await df('PATCH', `/guilds/${targetId}`, { splash: dataUri });
-              stats.splash = true;
-            }
-          } catch { /* skip */ }
+          const dataUri = await downloadAsDataURI(`https://cdn.discordapp.com/splashes/${sd.id}/${sd.splash}.png?size=1024`, 'image/png');
+          if (dataUri) { await df('PATCH', `/guilds/${targetId}`, { splash: dataUri }); stats.splash = true; }
         }
-
         send({ type: 'progress', message: '✅ تم نسخ الإعدادات' });
       }
 
       // ═══════════════════════════════════════════════════════════════
-      // المرحلة 5: إنشاء الكاتيجوريات بترتيب position مع الصلاحيات
+      // المرحلة 5: إنشاء الكاتيجوريات
       //
-      // ✅ الصلاحيات تتضمن في payload الإنشاء مباشرة (atomic creation)
-      // ✅ يتم تحويل ID الرتب و@everyone تلقائياً عبر transformOverwrites
+      // ✅ df مباشرة — بدون wrapper
+      // ✅ الصلاحيات مضمّنة في payload الإنشاء
       // ═══════════════════════════════════════════════════════════════
+      const failedChannels: any[] = []; // للإعادة لاحقاً
+
       if (options?.channels !== false && sChannels.length > 0) {
         const categories = sChannels
           .filter((c: any) => c.type === 4)
           .sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
 
         if (categories.length > 0) {
-          send({ type: 'progress', message: `📁 جاري إنشاء ${categories.length} كاتيجوري بصلاحيات...` });
+          send({ type: 'progress', message: `📁 جاري إنشاء ${categories.length} كاتيجوري...` });
 
           for (let i = 0; i < categories.length; i++) {
             const cat = categories[i];
-            const payload: any = {
-              name: cat.name,
-              type: 4,
-            };
+            const payload: any = { name: cat.name, type: 4 };
+            const overwrites = transformOverwrites(cat.permission_overwrites, roleMap, sourceId, targetId);
+            if (overwrites.length > 0) payload.permission_overwrites = overwrites;
 
-            // ✅ تضمين الصلاحيات في الإنشاء مباشرة
-            const overwrites = transformOverwrites(
-              cat.permission_overwrites,
-              roleMap,
-              sourceId,
-              targetId,
-            );
-            if (overwrites.length > 0) {
-              payload.permission_overwrites = overwrites;
-            }
-
-            const res2 = await createWithRetry(df, 'POST', `/guilds/${targetId}/channels`, payload);
-            if (res2.ok && res2.data?.id) {
-              catMap[cat.id] = res2.data.id;
-              channelMap[cat.id] = res2.data.id;
+            const res = await df('POST', `/guilds/${targetId}/channels`, payload);
+            if (res.ok && res.data?.id) {
+              catMap[cat.id] = res.data.id;
+              channelMap[cat.id] = res.data.id;
               stats.cats++;
               stats.permissions += overwrites.length;
             } else {
               stats.errors++;
+              failedChannels.push({ channel: cat, isCat: true });
             }
             send({ type: 'progress', message: `📁 كاتيجوري ${stats.cats}/${categories.length}: ${cat.name}` });
-            await delay(350);
+            await delay(500); // ✅ 500ms بين كل كاتيجوري
           }
           send({ type: 'stats', stats });
         }
 
         // ═══════════════════════════════════════════════════════════
-        // المرحلة 6: إنشاء الرومات تحت كل كاتيجوري بترتيب صحيح
+        // المرحلة 6: إنشاء الرومات تحت كل كاتيجوري
         //
         // ✅ لكل كاتيجوري: ننشئ روماتها بالترتيب (position)
-        // ✅ الصلاحيات تتضمن في payload الإنشاء مباشرة
-        // ✅ ثم ننشئ القنوات اليتيمة (بدون كاتيجوري)
+        // ✅ إذا فشلت قناة نحفظها ونعيدها لاحقاً
+        // ✅ تأخير 500ms بين كل قناة (بدل 350)
         // ═══════════════════════════════════════════════════════════
         const allOthers = sChannels.filter((c: any) => c.type !== 4);
-
-        // تجميع القنوات حسب الكاتيجوري الأم
         const channelsByParent: Record<string, any[]> = {};
         const orphanChannels: any[] = [];
 
@@ -766,60 +659,73 @@ export async function POST(request: NextRequest) {
             orphanChannels.push(c);
           }
         }
-        // ترتيب القنوات داخل كل كاتيجوري حسب position
         for (const parentId of Object.keys(channelsByParent)) {
           channelsByParent[parentId].sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
         }
-        // ترتيب القنوات اليتيمة
         orphanChannels.sort((a: any, b: any) => (a.position || 0) - (b.position || 0));
 
         const totalChannels = allOthers.length;
         let createdCount = 0;
 
         if (totalChannels > 0) {
-          send({ type: 'progress', message: `📺 جاري إنشاء ${totalChannels} قناة بصلاحيات...` });
+          send({ type: 'progress', message: `📺 جاري إنشاء ${totalChannels} قناة...` });
 
           // إنشاء رومات كل كاتيجوري بالترتيب
           for (const cat of categories) {
             const catChannels = channelsByParent[cat.id] || [];
             for (const c of catChannels) {
               const payload = buildChannelPayload(c, catMap, roleMap, sourceId, targetId);
-              const overwriteCount = payload.permission_overwrites?.length || 0;
 
-              const res2 = await createWithRetry(df, 'POST', `/guilds/${targetId}/channels`, payload);
-              if (res2.ok && res2.data?.id) {
-                channelMap[c.id] = res2.data.id;
+              const res = await df('POST', `/guilds/${targetId}/channels`, payload);
+              if (res.ok && res.data?.id) {
+                channelMap[c.id] = res.data.id;
                 incrementChannelStats(c, stats);
-                stats.permissions += overwriteCount;
+                stats.permissions += payload.permission_overwrites?.length || 0;
               } else {
                 stats.errors++;
+                failedChannels.push({ channel: c, isCat: false });
               }
 
               createdCount++;
-              const chType = getChannelEmoji(c.type);
-              send({ type: 'progress', message: `${chType} قناة ${createdCount}/${totalChannels}: ${c.name}` });
-              await delay(350);
+              send({ type: 'progress', message: `${getChannelEmoji(c.type)} ${createdCount}/${totalChannels}: ${c.name}` });
+              await delay(500); // ✅ 500ms — كان 350
             }
           }
 
-          // إنشاء القنوات اليتيمة (بدون كاتيجوري)
+          // إنشاء القنوات اليتيمة
           for (const c of orphanChannels) {
             const payload = buildChannelPayload(c, catMap, roleMap, sourceId, targetId);
-            const overwriteCount = payload.permission_overwrites?.length || 0;
 
-            const res2 = await createWithRetry(df, 'POST', `/guilds/${targetId}/channels`, payload);
-            if (res2.ok && res2.data?.id) {
-              channelMap[c.id] = res2.data.id;
+            const res = await df('POST', `/guilds/${targetId}/channels`, payload);
+            if (res.ok && res.data?.id) {
+              channelMap[c.id] = res.data.id;
               incrementChannelStats(c, stats);
-              stats.permissions += overwriteCount;
+              stats.permissions += payload.permission_overwrites?.length || 0;
             } else {
               stats.errors++;
+              failedChannels.push({ channel: c, isCat: false });
             }
 
             createdCount++;
-            const chType = getChannelEmoji(c.type);
-            send({ type: 'progress', message: `${chType} قناة ${createdCount}/${totalChannels}: ${c.name}` });
-            await delay(350);
+            send({ type: 'progress', message: `${getChannelEmoji(c.type)} ${createdCount}/${totalChannels}: ${c.name}` });
+            await delay(500);
+          }
+
+          // ✅ إعادة محاولة القنوات الفاشلة مرة واحدة
+          if (failedChannels.length > 0 && failedChannels.some(f => !f.isCat)) {
+            const failedRooms = failedChannels.filter(f => !f.isCat);
+            send({ type: 'progress', message: `🔄 إعادة محاولة ${failedRooms.length} قناة فاشلة...` });
+            for (const item of failedRooms) {
+              await delay(1500);
+              const payload = buildChannelPayload(item.channel, catMap, roleMap, sourceId, targetId);
+              const res = await df('POST', `/guilds/${targetId}/channels`, payload);
+              if (res.ok && res.data?.id) {
+                channelMap[item.channel.id] = res.data.id;
+                incrementChannelStats(item.channel, stats);
+                stats.permissions += payload.permission_overwrites?.length || 0;
+                stats.errors--;
+              }
+            }
           }
 
           send({ type: 'stats', stats });
@@ -830,30 +736,22 @@ export async function POST(request: NextRequest) {
         // ═══════════════════════════════════════════════════════════
         if (options?.settings !== false) {
           const guildPatch: any = {};
-          if (sourceSystemChannelId && channelMap[sourceSystemChannelId]) {
-            guildPatch.system_channel_id = channelMap[sourceSystemChannelId];
-          }
-          if (sourceRulesChannelId && channelMap[sourceRulesChannelId]) {
-            guildPatch.rules_channel_id = channelMap[sourceRulesChannelId];
-          }
-          if (sourcePublicUpdatesChannelId && channelMap[sourcePublicUpdatesChannelId]) {
-            guildPatch.public_updates_channel_id = channelMap[sourcePublicUpdatesChannelId];
-          }
-          if (sourceAfkChannelId && channelMap[sourceAfkChannelId]) {
-            guildPatch.afk_channel_id = channelMap[sourceAfkChannelId];
-          }
+          if (sourceSystemChannelId && channelMap[sourceSystemChannelId]) guildPatch.system_channel_id = channelMap[sourceSystemChannelId];
+          if (sourceRulesChannelId && channelMap[sourceRulesChannelId]) guildPatch.rules_channel_id = channelMap[sourceRulesChannelId];
+          if (sourcePublicUpdatesChannelId && channelMap[sourcePublicUpdatesChannelId]) guildPatch.public_updates_channel_id = channelMap[sourcePublicUpdatesChannelId];
+          if (sourceAfkChannelId && channelMap[sourceAfkChannelId]) guildPatch.afk_channel_id = channelMap[sourceAfkChannelId];
           if (Object.keys(guildPatch).length > 0) {
             await df('PATCH', `/guilds/${targetId}`, guildPatch);
-            send({ type: 'progress', message: '🔗 تم ربط قنوات النظام و AFK' });
+            send({ type: 'progress', message: '🔗 تم ربط قنوات النظام' });
           }
         }
 
         // ═══════════════════════════════════════════════════════════
-        // المرحلة 8: ترتيب القنوات (باستخدام channelMap)
+        // المرحلة 8: ترتيب القنوات
         // ═══════════════════════════════════════════════════════════
         const allNewCh = await df('GET', `/guilds/${targetId}/channels`);
         if (allNewCh.ok && Array.isArray(allNewCh.data)) {
-          // ترتيب الكاتيجوريات حسب المصدر
+          // ترتيب الكاتيجوريات
           const targetCats = allNewCh.data.filter((c: any) => c.type === 4);
           if (targetCats.length > 1) {
             const catPositions = targetCats.map((c: any) => {
@@ -862,59 +760,29 @@ export async function POST(request: NextRequest) {
               return { id: c.id, position: srcCat ? srcCat.position : 0 };
             });
             catPositions.sort((a: any, b: any) => a.position - b.position);
-            const normalizedCats = catPositions.map((item: any, idx: number) => ({
-              id: item.id,
-              position: idx,
-            }));
-            await df('PATCH', `/guilds/${targetId}/channels`, normalizedCats);
+            await df('PATCH', `/guilds/${targetId}/channels`, catPositions.map((item: any, idx: number) => ({ id: item.id, position: idx })));
             await delay(400);
           }
 
           // ترتيب القنوات داخل كل كاتيجوري
-          const targetChannelsByParent: Record<string, any[]> = {};
-          const targetOrphanChannels: any[] = [];
+          const targetByParent: Record<string, any[]> = {};
+          const targetOrphans: any[] = [];
           for (const c of allNewCh.data.filter((c: any) => c.type !== 4)) {
-            if (c.parent_id) {
-              if (!targetChannelsByParent[c.parent_id]) targetChannelsByParent[c.parent_id] = [];
-              targetChannelsByParent[c.parent_id].push(c);
-            } else {
-              targetOrphanChannels.push(c);
-            }
+            if (c.parent_id) { if (!targetByParent[c.parent_id]) targetByParent[c.parent_id] = []; targetByParent[c.parent_id].push(c); }
+            else targetOrphans.push(c);
           }
-
-          for (const [parentId, channels] of Object.entries(targetChannelsByParent)) {
+          for (const [parentId, channels] of Object.entries(targetByParent)) {
             if (channels.length <= 1) continue;
             const srcCatId = Object.entries(catMap).find(([, v]) => v === parentId)?.[0];
             if (!srcCatId) continue;
             const srcCatChannels = channelsByParent[srcCatId] || [];
-
-            const channelPositions = channels.map((c: any) => {
+            const positions = channels.map((c: any) => {
               const srcId = Object.entries(channelMap).find(([, v]) => v === c.id)?.[0];
               const srcCh = srcId ? srcCatChannels.find((sc: any) => sc.id === srcId) : null;
               return { id: c.id, position: srcCh ? srcCh.position : 0 };
             });
-            channelPositions.sort((a: any, b: any) => a.position - b.position);
-            const normalizedPositions = channelPositions.map((item: any, idx: number) => ({
-              id: item.id,
-              position: idx,
-            }));
-            await df('PATCH', `/guilds/${targetId}/channels`, normalizedPositions);
-            await delay(400);
-          }
-
-          // ترتيب القنوات اليتيمة
-          if (targetOrphanChannels.length > 1) {
-            const orphanPositions = targetOrphanChannels.map((c: any) => {
-              const srcId = Object.entries(channelMap).find(([, v]) => v === c.id)?.[0];
-              const srcCh = srcId ? orphanChannels.find((sc: any) => sc.id === srcId) : null;
-              return { id: c.id, position: srcCh ? srcCh.position : 0 };
-            });
-            orphanPositions.sort((a: any, b: any) => a.position - b.position);
-            const normalizedOrphans = orphanPositions.map((item: any, idx: number) => ({
-              id: item.id,
-              position: idx,
-            }));
-            await df('PATCH', `/guilds/${targetId}/channels`, normalizedOrphans);
+            positions.sort((a: any, b: any) => a.position - b.position);
+            await df('PATCH', `/guilds/${targetId}/channels`, positions.map((item: any, idx: number) => ({ id: item.id, position: idx })));
             await delay(400);
           }
         }
@@ -925,7 +793,6 @@ export async function POST(request: NextRequest) {
       // ═══════════════════════════════════════════════════════════════
       if (sEmojis.length > 0) {
         send({ type: 'progress', message: `😀 جاري نسخ ${sEmojis.length} إيموجي...` });
-
         for (let i = 0; i < sEmojis.length; i++) {
           const emoji = sEmojis[i];
           try {
@@ -933,88 +800,32 @@ export async function POST(request: NextRequest) {
               ? `https://cdn.discordapp.com/emojis/${emoji.id}.gif`
               : `https://cdn.discordapp.com/emojis/${emoji.id}.png`;
             const dataUri = await downloadAsDataURI(imageUrl, emoji.animated ? 'image/gif' : 'image/png');
-            if (!dataUri) {
-              stats.errors++;
-              continue;
-            }
-
+            if (!dataUri) { stats.errors++; continue; }
             const emojiRoles: string[] = [];
             if (emoji.roles && Array.isArray(emoji.roles)) {
-              for (const rid of emoji.roles) {
-                if (roleMap[rid]) emojiRoles.push(roleMap[rid]);
-              }
+              for (const rid of emoji.roles) { if (roleMap[rid]) emojiRoles.push(roleMap[rid]); }
             }
-
-            const res2 = await df('POST', `/guilds/${targetId}/emojis`, {
-              name: emoji.name,
-              image: dataUri,
-              roles: emojiRoles,
-            });
-            if (res2.ok && res2.data?.id) {
-              stats.emojis++;
-              emojiMap[emoji.id] = res2.data.id;
-            } else {
-              stats.errors++;
-            }
-          } catch {
-            stats.errors++;
-          }
-          send({ type: 'progress', message: `😀 إيموجي ${stats.emojis}/${sEmojis.length}: ${emoji.name}` });
-          await delay(700);
+            const res = await df('POST', `/guilds/${targetId}/emojis`, { name: emoji.name, image: dataUri, roles: emojiRoles });
+            if (res.ok && res.data?.id) { stats.emojis++; emojiMap[emoji.id] = res.data.id; }
+            else stats.errors++;
+          } catch { stats.errors++; }
+          send({ type: 'progress', message: `😀 ${stats.emojis}/${sEmojis.length}: ${emoji.name}` });
+          await delay(600);
         }
         send({ type: 'stats', stats });
       }
 
       // ═══════════════════════════════════════════════════════════════
-      // المرحلة 10: تحديث إيموجي الفورم بالمعرفات الجديدة
+      // المرحلة 10: تحديث إيموجي الفورم
       // ═══════════════════════════════════════════════════════════════
       if (Object.keys(emojiMap).length > 0 && Object.keys(channelMap).length > 0) {
-        let forumUpdated = 0;
         for (const [srcChId, tgtChId] of Object.entries(channelMap)) {
           const srcCh = sChannels.find((c: any) => c.id === srcChId);
           if (!srcCh || (srcCh.type !== 15 && srcCh.type !== 16)) continue;
-          if (!srcCh.default_reaction_emoji || !srcCh.default_reaction_emoji.emoji_id) continue;
-
-          const srcEmojiId = srcCh.default_reaction_emoji.emoji_id;
-          const newEmojiId = emojiMap[srcEmojiId];
-          if (!newEmojiId) continue;
-
-          try {
-            await df('PATCH', `/channels/${tgtChId}`, {
-              default_reaction_emoji: { emoji_id: newEmojiId },
-            });
-            forumUpdated++;
+          if (srcCh.default_reaction_emoji?.emoji_id && emojiMap[srcCh.default_reaction_emoji.emoji_id]) {
+            await df('PATCH', `/channels/${tgtChId}`, { default_reaction_emoji: { emoji_id: emojiMap[srcCh.default_reaction_emoji.emoji_id] } });
             await delay(300);
-          } catch { /* skip */ }
-        }
-        if (forumUpdated > 0) {
-          send({ type: 'progress', message: `💬 تم تحديث ${forumUpdated} إيموجي فورم` });
-        }
-
-        // تحديث tags اللي فيها إيموجي مخصصة
-        let tagsUpdated = 0;
-        for (const [srcChId, tgtChId] of Object.entries(channelMap)) {
-          const srcCh = sChannels.find((c: any) => c.id === srcChId);
-          if (!srcCh || (srcCh.type !== 15 && srcCh.type !== 16)) continue;
-          if (!srcCh.available_tags || !Array.isArray(srcCh.available_tags)) continue;
-
-          const hasCustomEmojiTags = srcCh.available_tags.some((tag: any) => tag.emoji_id && emojiMap[tag.emoji_id]);
-          if (!hasCustomEmojiTags) continue;
-
-          try {
-            const newTags = srcCh.available_tags.map((tag: any) => ({
-              name: tag.name,
-              moderated: tag.moderated || false,
-              emoji_id: (tag.emoji_id && emojiMap[tag.emoji_id]) || null,
-              emoji_name: tag.emoji_name || null,
-            }));
-            await df('PATCH', `/channels/${tgtChId}`, { available_tags: newTags });
-            tagsUpdated++;
-            await delay(300);
-          } catch { /* skip */ }
-        }
-        if (tagsUpdated > 0) {
-          send({ type: 'progress', message: `🏷️ تم تحديث ${tagsUpdated} تاج إيموجي` });
+          }
         }
       }
 
@@ -1023,31 +834,14 @@ export async function POST(request: NextRequest) {
       // ═══════════════════════════════════════════════════════════════
       if (sStickers.length > 0) {
         send({ type: 'progress', message: `🎨 جاري نسخ ${sStickers.length} ستكر...` });
-
         for (let i = 0; i < sStickers.length; i++) {
           const sticker = sStickers[i];
-
-          // Lottie stickers لا يمكن إعادة رفعها
-          if (sticker.format_type === 3) {
-            send({ type: 'progress', message: `⏭️ تخطي ستكر Lottie: ${sticker.name}` });
-            stats.errors++;
-            continue;
-          }
-
+          if (sticker.format_type === 3) { stats.errors++; continue; }
           try {
-            let ext = 'png';
-            let mime = 'image/png';
-            if (sticker.format_type === 2) {
-              ext = 'gif';
-              mime = 'image/gif';
-            } else if (sticker.format_type === 4) {
-              ext = 'webp';
-              mime = 'image/webp';
-            }
-
-            const imgUrl = `https://cdn.discordapp.com/stickers/${sticker.id}.${ext}`;
-            const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(25000) });
-
+            let ext = 'png', mime = 'image/png';
+            if (sticker.format_type === 2) { ext = 'gif'; mime = 'image/gif'; }
+            else if (sticker.format_type === 4) { ext = 'webp'; mime = 'image/webp'; }
+            const imgRes = await fetch(`https://cdn.discordapp.com/stickers/${sticker.id}.${ext}`, { signal: AbortSignal.timeout(20000) });
             if (imgRes.ok) {
               const buf = await imgRes.arrayBuffer();
               const fd = new FormData();
@@ -1055,36 +849,13 @@ export async function POST(request: NextRequest) {
               fd.append('description', sticker.description || '');
               fd.append('tags', sticker.tags || '');
               fd.append('file', new File([buf], `${sticker.name}.${ext}`, { type: mime }));
-
-              const res2 = await dFetchFormData(auth, `${DISCORD_API}/guilds/${targetId}/stickers`, fd);
-              if (res2.ok) stats.stickers++;
-              else stats.errors++;
-            } else {
-              // Fallback to PNG
-              const fallbackUrl = `https://cdn.discordapp.com/stickers/${sticker.id}.png`;
-              const fallbackRes = await fetch(fallbackUrl, { signal: AbortSignal.timeout(25000) });
-              if (fallbackRes.ok) {
-                const buf = await fallbackRes.arrayBuffer();
-                const fd = new FormData();
-                fd.append('name', sticker.name);
-                fd.append('description', sticker.description || '');
-                fd.append('tags', sticker.tags || '');
-                fd.append('file', new File([buf], `${sticker.name}.png`, { type: 'image/png' }));
-
-                const res2 = await dFetchFormData(auth, `${DISCORD_API}/guilds/${targetId}/stickers`, fd);
-                if (res2.ok) stats.stickers++;
-                else stats.errors++;
-              } else {
-                stats.errors++;
-              }
-            }
-          } catch {
-            stats.errors++;
-          }
-          send({ type: 'progress', message: `🎨 ستكر ${stats.stickers}/${sStickers.length}: ${sticker.name}` });
-          await delay(800);
+              const res = await dFetchFormData(auth, `${DISCORD_API}/guilds/${targetId}/stickers`, fd);
+              if (res.ok) stats.stickers++; else stats.errors++;
+            } else { stats.errors++; }
+          } catch { stats.errors++; }
+          send({ type: 'progress', message: `🎨 ${stats.stickers}/${sStickers.length}: ${sticker.name}` });
+          await delay(700);
         }
-        send({ type: 'stats', stats });
       }
 
       // ═══════════════════════════════════════════════════════════════
@@ -1092,51 +863,28 @@ export async function POST(request: NextRequest) {
       // ═══════════════════════════════════════════════════════════════
       if (sAutoMod.length > 0) {
         send({ type: 'progress', message: `🤖 جاري نسخ ${sAutoMod.length} قاعدة أوتو مود...` });
-
-        for (let i = 0; i < sAutoMod.length; i++) {
-          const rule = sAutoMod[i];
+        for (const rule of sAutoMod) {
           try {
             const actions = (rule.actions || []).map((a: any) => {
               const action: any = { type: a.type };
               if (a.metadata && Object.keys(a.metadata).length > 0) {
                 action.metadata = { ...a.metadata };
-                if (action.metadata.channel_id && channelMap[action.metadata.channel_id]) {
-                  action.metadata.channel_id = channelMap[action.metadata.channel_id];
-                } else if (action.metadata.channel_id) {
-                  delete action.metadata.channel_id; // القناة ما انشاءت
-                }
-                if (action.metadata.role_id && roleMap[action.metadata.role_id]) {
-                  action.metadata.role_id = roleMap[action.metadata.role_id];
-                } else if (action.metadata.role_id) {
-                  delete action.metadata.role_id; // الرتبة ما انشاءت
-                }
+                if (action.metadata.channel_id && channelMap[action.metadata.channel_id]) action.metadata.channel_id = channelMap[action.metadata.channel_id];
+                else if (action.metadata.channel_id) delete action.metadata.channel_id;
+                if (action.metadata.role_id && roleMap[action.metadata.role_id]) action.metadata.role_id = roleMap[action.metadata.role_id];
+                else if (action.metadata.role_id) delete action.metadata.role_id;
               }
               return action;
             });
-
-            const exemptRoles = (rule.exempt_roles || [])
-              .map((rid: string) => roleMap[rid])
-              .filter(Boolean);
-            const exemptChannels = (rule.exempt_channels || [])
-              .map((cid: string) => channelMap[cid])
-              .filter(Boolean);
-
-            const res2 = await df('POST', `/guilds/${targetId}/auto-moderation/rules`, {
-              name: rule.name,
-              enabled: rule.enabled !== false,
-              event_type: rule.event_type,
-              trigger_type: rule.trigger_type,
-              trigger_metadata: rule.trigger_metadata || {},
-              actions,
-              exempt_roles: exemptRoles,
-              exempt_channels: exemptChannels,
+            const exemptRoles = (rule.exempt_roles || []).map((rid: string) => roleMap[rid]).filter(Boolean);
+            const exemptChannels = (rule.exempt_channels || []).map((cid: string) => channelMap[cid]).filter(Boolean);
+            const res = await df('POST', `/guilds/${targetId}/auto-moderation/rules`, {
+              name: rule.name, enabled: rule.enabled !== false, event_type: rule.event_type,
+              trigger_type: rule.trigger_type, trigger_metadata: rule.trigger_metadata || {},
+              actions, exempt_roles: exemptRoles, exempt_channels: exemptChannels,
             });
-            if (res2.ok) stats.autoMod++;
-            else stats.errors++;
-          } catch {
-            stats.errors++;
-          }
-          send({ type: 'progress', message: `🤖 أوتو مود ${stats.autoMod}/${sAutoMod.length}: ${rule.name}` });
+            if (res.ok) stats.autoMod++; else stats.errors++;
+          } catch { stats.errors++; }
           await delay(500);
         }
       }
@@ -1144,7 +892,7 @@ export async function POST(request: NextRequest) {
       // ═══════════════════════════════════════════════════════════════
       // النتيجة النهائية
       // ═══════════════════════════════════════════════════════════════
-      const doneEmbed = {
+      sendToWebhook({
         username: 'TRJ Copy',
         embeds: [{
           title: '✅ Copy Completed',
@@ -1158,28 +906,22 @@ export async function POST(request: NextRequest) {
             { name: '😀 Emojis', value: String(stats.emojis), inline: true },
             { name: '🎨 Stickers', value: String(stats.stickers), inline: true },
             { name: '🤖 AutoMod', value: String(stats.autoMod), inline: true },
-            { name: '🔐 Permissions', value: String(stats.permissions), inline: true },
-            { name: '🖼️ Icon', value: stats.icon ? 'Yes' : 'No', inline: true },
-            { name: '🌈 Banner', value: stats.banner ? 'Yes' : 'No', inline: true },
+            { name: '🔐 Perms', value: String(stats.permissions), inline: true },
+            { name: '🖼️ Icon', value: stats.icon ? '✅' : '❌', inline: true },
+            { name: '🌈 Banner', value: stats.banner ? '✅' : '❌', inline: true },
             { name: '❌ Errors', value: String(stats.errors), inline: true },
           ],
           timestamp: new Date().toISOString(),
         }],
-      };
-      sendToWebhook(doneEmbed, whUrl).catch(() => {});
+      }, whUrl).catch(() => {});
 
       const summary = [
         `✅ تم النسخ!`,
         `${stats.roles} رتب | ${stats.cats} كاتيجوري | ${stats.txt} كتابي | ${stats.voice} صوتي | ${stats.forums} فورم`,
-        `${stats.emojis} إيموجي | ${stats.stickers} ستكر | ${stats.autoMod} أوتو مود`,
-        `${stats.permissions} صلاحية`,
-        stats.icon ? '🖼️ أيقونة' : '',
-        stats.banner ? '🌈 بانر' : '',
-        stats.splash ? '💦 سبلش' : '',
+        `${stats.emojis} إيموجي | ${stats.stickers} ستكر | ${stats.autoMod} أوتو مود | ${stats.permissions} صلاحية`,
+        stats.icon ? '🖼️ أيقونة' : '', stats.banner ? '🌈 بانر' : '', stats.splash ? '💦 سبلش' : '',
         `${stats.errors} أخطاء`,
-      ]
-        .filter(Boolean)
-        .join(' | ');
+      ].filter(Boolean).join(' | ');
 
       send({ type: 'done', success: true, stats, message: summary });
     });
