@@ -1,4 +1,3 @@
-
 export const DISCORD_API: string = 'https://discord.com/api/v10';
 
 export interface DiscordResult {
@@ -104,9 +103,14 @@ async function doFetch(
   const headers: Record<string, string> = {
     'Authorization': auth,
     'Accept': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
 
-  if (method !== 'GET' && method !== 'HEAD') {
+  // ✅ إصلاح مهم: نضيف Content-Type فقط لو في body فعلي
+  // السبب: Discord عند رؤية Content-Type: application/json في طلب DELETE بدون body،
+  // يحاول تحليل body فارغ كـ JSON ويرمي الخطأ 50109 ("The request body contains invalid JSON.")
+  const hasBody = method !== 'GET' && method !== 'HEAD' && body !== undefined && body !== null;
+  if (hasBody) {
     headers['Content-Type'] = 'application/json';
   }
 
@@ -114,7 +118,7 @@ async function doFetch(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
-    const fetchBody = (method !== 'GET' && method !== 'HEAD' && body) ? JSON.stringify(body) : undefined;
+    const fetchBody = hasBody ? JSON.stringify(body) : undefined;
 
     const res = await fetch(url, {
       method,
@@ -205,4 +209,3 @@ export function resetGlobalRL() {
 export function getGlobalRLState() {
   return { until: globalRLUntil };
 }
-
