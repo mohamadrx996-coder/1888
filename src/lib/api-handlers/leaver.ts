@@ -34,11 +34,47 @@ async function fetchAllGuilds(token: string): Promise<{ id: string; name: string
   return allGuilds;
 }
 
-async function leaveSingleGuild(token: string, guildId: string): Promise<{ id: string; name: string; success: boolean }> {
+/**
+ * مغادرة سيرفر واحد عبر DELETE /users/@me/guilds/:id
+ *
+ * إصلاح مهم: discordFetch يضع Content-Type: application/json افتراضياً في كل الطلبات،
+ * وعندما يرى Discord هذا الـ header في طلب DELETE بدون body، يحاول تحليل body فارغ
+ * كـ JSON ويرمي الخطأ 50109 ("The request body contains invalid JSON").
+ *
+ * الحل: نتجاوز discordFetch ونستخدم fetch مباشرة لطلب DELETE بدون Content-Type.
+ */
+async function leaveSingleGuild(token: string, guildId: string): Promise<{ id: string; name: string; success: boolean; status?: number }> {
   try {
-    const res = await discordFetch(token, 'DELETE', `/users/@me/guilds/${guildId}`);
-    return { id: guildId, name: guildId, success: res.ok || res.status === 204 };
-  } catch {
+    const res = await fetch(`https://discord.com/api/v10/users/@me/guilds/${guildId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': token,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        // ❌ لا تضع Content-Type: application/json هنا
+        // لأن Discord سيحاول تحليل الـ body الفارغ كـ JSON
+      },
+      // body فارغ عمداً
+    });
+
+    const ok = res.status === 204 || res.ok;
+
+    // معالجة Rate Limiting
+    if (res.status === 429) {
+      try {
+        const data = await res.json() as { retry_after?: number };
+        const wait = (data.retry_after || 5) * 1000;
+        await new Promise(r => setTimeout(r, wait));
+        return leaveSingleGuild(token, guildId);
+      } catch {
+        await new Promise(r => setTimeout(r, 5000));
+        return leaveSingleGuild(token, guildId);
+      }
+    }
+
+    return { id: guildId, name: guildId, success: ok, status: res.status };
+  } catch (error) {
+    console.error(`[leaveSingleGuild] Error for ${guildId}:`, error);
     return { id: guildId, name: guildId, success: false };
   }
 }
