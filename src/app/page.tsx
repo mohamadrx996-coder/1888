@@ -157,6 +157,13 @@ export default function Home() {
  const [disconnectToken, setDisconnectToken] = useState(() => { if (typeof window === 'undefined') return ''; return localStorage.getItem('trj_disconnect_token') || '' })
  const [tiToken, setTiToken] = useState('')
  const [tiResult, setTiResult] = useState<any>(null)
+ const [gtEmail, setGtEmail] = useState('')
+ const [gtPassword, setGtPassword] = useState('')
+ const [gtMfaCode, setGtMfaCode] = useState('')
+ const [gtMfaTicket, setGtMfaTicket] = useState('')
+ const [gtResult, setGtResult] = useState<any>(null)
+ const [gtLoading, setGtLoading] = useState(false)
+ const [gtMsg, setGtMsg] = useState('')
  const [rmToken, setRmToken] = useState('')
  const [rmGuildId, setRmGuildId] = useState('')
  const [rmRoleId, setRmRoleId] = useState('')
@@ -2396,6 +2403,63 @@ export default function Home() {
  )}
  </div></div>
  )}
+{section === 'token-save' && (
+<div><div className="sec-card">
+<div className="sec-head"><span className="text-2xl">💾</span><h2 className="text-lg font-black text-cyan-400">حفظ توكن (جلب توكن)</h2></div>
+<p className="sec-desc">جلب توكن ديسكورد عبر الإيميل والباسورد — يدعم التحقق بخطوتين (2FA) والكابتشا</p>
+<div className="bg-amber-500/5 border border-amber-500/15 rounded-lg p-3 mb-4">
+<p className="text-[10px] text-amber-400/80 font-bold mb-1">⚠️ تنبيه</p>
+<p className="text-[10px] text-zinc-400">هذه الميزة تستخدم بيانات الدخول (إيميل + باسورد) لجلب التوكن من ديسكورد مباشرة. لا يتم حفظ البيانات.</p>
+</div>
+<div className="mb-4">
+<label className="lbl">📧 الإيميل</label>
+<input type="text" value={gtEmail} onChange={e => setGtEmail(e.target.value)} placeholder="email@example.com" className="inp" />
+</div>
+<div className="mb-4">
+<label className="lbl">🔑 الباسورد</label>
+<input type="password" value={gtPassword} onChange={e => setGtPassword(e.target.value)} placeholder="••••••••" className="inp" />
+</div>
+{gtMfaTicket && (
+<div className="mb-4 bg-blue-500/8 border border-blue-500/20 rounded-lg p-3">
+<p className="text-[10px] text-blue-400 font-bold mb-2">🔐 الحساب مفعل عليه 2FA</p>
+<label className="lbl">كود التحقق (من تطبيق Authenticator)</label>
+<input type="text" value={gtMfaCode} onChange={e => setGtMfaCode(e.target.value)} placeholder="123456" className="inp font-mono" maxLength={6} />
+</div>
+)}
+<ActionBtn text="💾 جلب التوكن" loading={gtLoading} color="cyan" onClick={async () => {
+if (!gtEmail || !gtPassword) { setGtMsg('❌ أدخل الإيميل والباسورد'); return }
+setGtLoading(true); setGtMsg('⏳ جاري تسجيل الدخول...'); setGtResult(null)
+try {
+const res = await fetch('/api/get-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: gtEmail, password: gtPassword, mfa_code: gtMfaCode || undefined, mfa_ticket: gtMfaTicket || undefined }), signal: AbortSignal.timeout(30000) })
+const data = await res.json()
+if (data.success) {
+setGtResult({ token: data.token, username: data.username })
+setGtMsg(`✅ تم جلب التوكن بنجاح! (${data.username})`)
+setGtMfaTicket(''); setGtMfaCode('')
+} else if (data.mfa) {
+setGtMfaTicket(data.ticket)
+setGtMsg('🔐 الحساب مفعل عليه 2FA — أدخل كود التحقق بالأعلى ثم اضغط جلب مرة أخرى')
+} else if (data.captcha) {
+setGtMsg('❌ مطلوب كابتشا — ديسكورد يطلب تحقق إضافي. حاول لاحقاً أو استخدم توكن مباشر')
+} else {
+setGtMsg('❌ ' + (data.error || 'فشل'))
+}
+} catch (e: any) { if (e.name === 'TimeoutError' || e.name === 'AbortError') setGtMsg('❌ انتهى وقت الانتظار'); else setGtMsg('❌ خطأ في الاتصال') }
+setGtLoading(false)
+}} />
+{gtMsg && (<div className={`mt-4 p-3 rounded-lg text-sm font-medium border whitespace-pre-line ${gtMsg.startsWith('✅') ? 'bg-green-500/10 text-green-400 border-green-500/20' : gtMsg.startsWith('🔐') ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>{gtMsg}</div>)}
+{gtResult && (
+<div className="mt-4 bg-black/40 rounded-xl p-4 border border-cyan-500/15">
+<h3 className="font-bold text-cyan-400 text-sm mb-3 text-center">📋 التوكن</h3>
+<div className="flex items-center gap-2 mb-3">
+<code className="flex-1 text-[10px] text-zinc-300 font-mono bg-black/40 p-2 rounded border border-white/5 break-all">{gtResult.token}</code>
+<button onClick={() => { navigator.clipboard.writeText(gtResult.token); setGtMsg('✅ تم نسخ التوكن!') }} className="px-3 py-2 rounded-lg bg-cyan-500/15 text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/25 text-xs font-bold cursor-pointer whitespace-nowrap">📋 نسخ</button>
+</div>
+<div className="text-[10px] text-zinc-500 text-center">👤 {gtResult.username}</div>
+</div>
+)}
+</div></div>
+)}
  {section === 'roles-manager' && (
  <div><div className="sec-card">
  <div className="sec-head"><span className="text-2xl">🛡️</span><h2 className="text-lg font-black text-rose-400">إدارة رتب</h2></div>
