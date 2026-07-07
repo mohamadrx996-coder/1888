@@ -1582,74 +1582,71 @@ export default function Home() {
  const list = sniperMode === 'auto' ? Array.from({ length: sniperCount }, () => genUsername()) : usernames.split('\n').map(u => u.trim()).filter(Boolean)
  if (list.length === 0) { setResult('❌ أدخل يوزر واحد على الأقل'); return }
  setLoading(true); setResult(''); setStats(null); setSniperResults([]); setSniperAccountInfo(null); setSniperStats(null); setAvailableNames([]); setProgress('🎯 جاري بدء الفحص المباشر...')
+ // فحص يوزر واحد في كل مرة (client-side loop) — كل طلب سريع جداً
+ const liveStats = { available: 0, taken: 0, errors: 0, rateLimitHits: 0, total: 0 }
+ let consecutiveRL = 0
+ for (let i = 0; i < list.length; i++) {
+ const username = list[i]
+ setProgress(`🔍 [${i + 1}/${list.length}] فحص: ${username}...`)
  try {
- const res = await fetch('/api/sniper-stream', {
+ const res = await fetch('/api/sniper-check', {
  method: 'POST',
  headers: { 'Content-Type': 'application/json' },
- body: JSON.stringify({
- token: sniperToken,
- mode: sniperMode,
- count: sniperCount,
- length: sniperLength,
- pattern: sniperPattern,
- useDot, useUnderscore,
- usernames: sniperMode === 'manual' ? usernames : undefined
+ body: JSON.stringify({ token: sniperToken, username }),
+ signal: AbortSignal.timeout(15000)
  })
- })
- if (!res.ok || !res.body) {
- const err = await res.json().catch(() => ({ error: 'فشل الاتصال' }))
- setResult(`❌ ${err.error || 'فشل'}`); setLoading(false); setProgress(''); return
+ const data = await res.json()
+ if (data.success && data.result) {
+ setSniperResults(prev => [...prev, data.result])
+ liveStats.total++
+ if (data.result.color === 'green') {
+ liveStats.available++
+ setAvailableNames(prev => [...prev, data.result.username])
+ } else if (data.result.color === 'red' && data.result.taken) {
+ liveStats.taken++
+ } else {
+ liveStats.errors++
  }
- const reader = res.body.getReader()
- const decoder = new TextDecoder()
- let buffer = ''
- const liveStats = { available: 0, taken: 0, errors: 0, rateLimitHits: 0, total: 0 }
- while (true) {
- const { done, value } = await reader.read()
- if (done) break
- buffer += decoder.decode(value, { stream: true })
- const lines = buffer.split('\n')
- buffer = lines.pop() || ''
- let currentEvent = ''
- for (const line of lines) {
- if (line.startsWith('event: ')) { currentEvent = line.substring(7).trim() }
- else if (line.startsWith('data: ') && currentEvent) {
- try {
- const d = JSON.parse(line.substring(6))
- if (currentEvent === 'start') {
- setProgress(`🎯 بدء فحص ${d.total} يوزر — الحساب: ${d.account} (MFA: ${d.mfa ? 'نعم' : 'لا'})`)
- setSniperAccountInfo({ username: d.account, mfa: d.mfa, id: '?' })
- } else if (currentEvent === 'checking') {
- setProgress(`🔍 [${d.index + 1}/${d.total}] فحص: ${d.username}...`)
- } else if (currentEvent === 'result') {
- setSniperResults(prev => [...prev, d.result])
- liveStats.available = d.stats.available
- liveStats.taken = d.stats.taken
- liveStats.errors = d.stats.errors
- liveStats.rateLimitHits = d.stats.rateLimitHits
- liveStats.total = d.stats.total
+ if (data.result.rateLimited) {
+ liveStats.rateLimitHits++
+ consecutiveRL++
+ } else {
+ consecutiveRL = 0
+ }
  setSniperStats({ ...liveStats, available: liveStats.available })
- if (d.result.color === 'green' && d.result.username) {
- setAvailableNames(prev => [...prev, d.result.username])
- }
- } else if (currentEvent === 'stopped') {
- setProgress(`⏳ توقف: ${d.reason}`)
- } else if (currentEvent === 'done') {
- setSniperStats(d.stats)
- setAvailableNames(d.availableNames)
- setProgress(`✅ اكتمل! متاح: ${d.stats.available} | محجوز: ${d.stats.taken} | أخطاء: ${d.stats.errors}`)
- setResult(d.stats.available > 0 ? `✅ تم العثور على ${d.stats.available} يوزر متاح!` : '⚠️ لم يتم العثور على يوزرات متاحة')
- }
- } catch {}
- currentEvent = ''
- }
+ } else {
+ // خطأ في الطلب
+ liveStats.errors++
+ liveStats.total++
+ setSniperResults(prev => [...prev, { username, status: '❌ ' + (data.error || 'فشل'), color: 'red', method: 'client', debug: data.error }])
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ if (data.rateLimited) {
+ consecutiveRL++
+ liveStats.rateLimitHits++
  }
  }
  } catch (e: any) {
- if (e.name === 'AbortError' || e.name === 'TimeoutError') setResult('❌ انتهى وقت الانتظار')
- else setResult('❌ خطأ في الاتصال: ' + (e.message || ''))
+ liveStats.errors++
+ liveStats.total++
+ setSniperResults(prev => [...prev, { username, status: '❌ خطأ في الاتصال', color: 'yellow', method: 'client', debug: e?.message || 'error' }])
+ setSniperStats({ ...liveStats, available: liveStats.available })
  }
- setLoading(false); setProgress('')
+ // توقف لو 5 rate limits متتالية
+ if (consecutiveRL >= 5) {
+ setProgress(`⏳ توقف: 5 rate limits متتالية`)
+ setResult(`⏳ توقف بسبب Rate Limit — فحص ${liveStats.total} يوزر`)
+ break
+ }
+ // تأخير قصير قبل اليوزر التالي (تجنب rate limit)
+ if (i < list.length - 1) {
+ const delay = consecutiveRL > 0 ? 2000 : 600
+ await new Promise(r => setTimeout(r, delay))
+ }
+ }
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ setProgress(`✅ اكتمل! متاح: ${liveStats.available} | محجوز: ${liveStats.taken} | أخطاء: ${liveStats.errors}`)
+ setResult(liveStats.available > 0 ? `✅ تم العثور على ${liveStats.available} يوزر متاح!` : '⚠️ لم يتم العثور على يوزرات متاحة')
+ setLoading(false)
  }} />
  {sniperStats && (<div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2"><div className="bg-green-500/8 rounded-lg p-2.5 border border-green-500/10 text-center"><div className="text-lg font-black text-green-400">{sniperStats.available}</div><div className="text-[9px] text-green-300/60">✅ متاح</div></div><div className="bg-red-500/8 rounded-lg p-2.5 border border-red-500/10 text-center"><div className="text-lg font-black text-red-400">{sniperStats.taken}</div><div className="text-[9px] text-red-300/60">❌ محجوز</div></div><div className="bg-yellow-500/8 rounded-lg p-2.5 border border-yellow-500/10 text-center"><div className="text-lg font-black text-yellow-400">{sniperStats.errors}</div><div className="text-[9px] text-yellow-300/60">⚠️ خطأ</div></div><div className="bg-blue-500/8 rounded-lg p-2.5 border border-blue-500/10 text-center"><div className="text-lg font-black text-blue-400">{sniperStats.rateLimitHits || 0}</div><div className="text-[9px] text-blue-300/60">⏳ RL</div></div></div>)}
  {availableNames.length > 0 && (<div className="mt-4 bg-green-500/8 rounded-lg p-4 border border-green-500/20"><div className="flex items-center justify-between mb-2"><h3 className="font-bold text-green-400 text-sm">🏆 اليوزرات المتاحة! ({availableNames.length})</h3><button onClick={() => { navigator.clipboard.writeText(availableNames.join('\n')); setResult('📋 تم النسخ!') }} className="text-[10px] text-green-300 bg-green-500/15 px-2.5 py-1 rounded-lg border border-green-500/20 hover:bg-green-500/25 cursor-pointer">📋 نسخ الكل</button></div><div className="flex flex-wrap gap-1.5">{availableNames.map((name, i) => (<button key={i} onClick={() => { navigator.clipboard.writeText(name); setResult(`📋 تم نسخ: ${name}`) }} className="text-xs font-mono text-green-400 bg-green-500/10 px-2.5 py-1.5 rounded-lg border border-green-500/20 hover:bg-green-500/20 cursor-pointer">{name} 📋</button>))}</div></div>)}
