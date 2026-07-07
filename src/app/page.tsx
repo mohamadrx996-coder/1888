@@ -1564,7 +1564,7 @@ export default function Home() {
  <button onClick={async () => { if (!sniperToken) { setResult('❌ أدخل التوكن أولاً'); return }; setLoading(true); setProgress('🧪 فحص تجريبي بـ 3 طرق...'); try { const res = await fetch('/api/sniper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: sniperToken, action: 'test' }) }); const data = await res.json(); if (data.success) { const t = data.test; let out = '🧪 فحص تجريبي - 3 طرق\nالحساب: ' + t.account + ' | MFA: ' + (t.mfa ? 'نعم' : 'لا') + ' | Phone: ' + (t.phone ? 'نعم' : 'لا') + ' | Verified: ' + (t.verified ? 'نعم' : 'لا') + '\n'; for (const r of t.results) { out += '\n━━ ' + r.label + ' ━━\n'; for (const m of r.results) { out += ' [' + (m.method || '?') + '] ' + m.status; if (m.debug) out += ' (' + m.debug + ')'; out += '\n'; } } setResult(out) } else { setResult('❌ ' + data.error) } } catch (e: any) { setResult('❌ خطأ: ' + (e.message || 'غير معروف')) }; setLoading(false); setProgress('') }} className="text-xs text-purple-400 bg-purple-500/10 px-2.5 py-1.5 rounded-lg border border-purple-500/20 hover:bg-purple-500/20 cursor-pointer">🧪 فحص</button>
  </div>
  </div>
- <p className="sec-desc">{'⚡ يستخدم 3 طرق: pomelo-attempt + PATCH /users/@me + GET /users/{name}'}</p>
+ <p className="sec-desc">{'⚡ فحص مباشر (Live) — كل يوزر يُفحص ويظهر فوراً قبل الانتقال للتالي. مناسب للاستضافات بحد زمني.'}</p>
  {sniperAccountInfo && (<div className="mb-4 bg-cyan-500/5 rounded-lg p-4 border border-cyan-500/15">
  <div className="flex items-center gap-3 mb-2"><div className="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-white font-bold text-sm">{(sniperAccountInfo.username || '?')[0].toUpperCase()}</div><div><div className="text-sm font-bold text-cyan-300">{sniperAccountInfo.username}</div><div className="text-[10px] text-cyan-500/60 font-mono">{sniperAccountInfo.id}</div></div><div className="ml-auto flex gap-2">{sniperAccountInfo.mfa && <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded-full border border-green-500/20">🔒 MFA</span>}{sniperAccountInfo.nitro !== 'None' && <span className="text-[10px] text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full border border-purple-500/20">💎 {sniperAccountInfo.nitro}</span>}</div></div>
  {availableNames.length > 0 && (<div className="mt-3"><button onClick={async () => { const name = availableNames[0]; setLoading(true); setProgress(`🔄 جاري تغيير اليوزر إلى: ${name}...`); try { const res = await fetch('/api/sniper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: sniperToken, action: 'changeUsername', targetUsername: name }) }); const data = await res.json(); if (data.success) setResult(`✅ تم تغيير اليوزر إلى: ${name}`); else setResult(`❌ ${data.error}`) } catch { setResult('❌ خطأ') }; setLoading(false); setProgress('') }} className="text-xs text-green-400 bg-green-500/15 px-3 py-2 rounded-lg border border-green-500/25 hover:bg-green-500/25 cursor-pointer font-bold">🎯 خذ {availableNames[0]}</button></div>)}
@@ -1577,7 +1577,80 @@ export default function Home() {
  <div className="mb-4"><label className="lbl">🎨 نمط التوليد</label><div className="grid grid-cols-5 sm:grid-cols-5 gap-1">{[{ id: 'random', label: 'عشوائي', icon: '🎲' }, { id: 'consonants', label: 'ساكنات', icon: '🔤' }, { id: 'numbers', label: 'أرقام', icon: '🔢' }, { id: 'dictionary', label: 'كلمات', icon: '📖' }, { id: 'rare', label: 'نادر', icon: '💎' }].map(p => (<button key={p.id} onClick={() => setSniperPattern(p.id)} className={`py-1.5 sm:py-2 rounded-lg text-[9px] sm:text-[10px] font-bold cursor-pointer text-center ${sniperPattern === p.id ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-black/20 text-green-600 hover:text-green-400 border border-transparent'}`}><span className="text-sm sm:text-base block mb-0.5">{p.icon}</span><span className="hidden sm:inline">{p.label}</span></button>))}</div></div>
  <div className="flex gap-3 mb-4"><label className="flex items-center gap-2 text-xs text-green-400 bg-zinc-800/50 px-3 py-2 rounded-lg border border-zinc-700/20 cursor-pointer"><input type="checkbox" checked={useDot} onChange={e => setUseDot(e.target.checked)} className="accent-emerald-500" /> نقطة (.)</label><label className="flex items-center gap-2 text-xs text-green-400 bg-zinc-800/50 px-3 py-2 rounded-lg border border-zinc-700/20 cursor-pointer"><input type="checkbox" checked={useUnderscore} onChange={e => setUseUnderscore(e.target.checked)} className="accent-emerald-500" /> شرطة (_)</label></div>
  </>) : (<div className="mb-4"><label className="lbl">📝 اليوزرات (كل يوزر سطر)</label><textarea value={usernames} onChange={e => setUsernames(e.target.value)} placeholder={"username1\nusername2"} rows={4} className="inp" /></div>)}
- <ActionBtn text="🎯 بدء الفحص" loading={loading} onClick={async () => { const list = sniperMode === 'auto' ? Array.from({ length: sniperCount }, () => genUsername()) : usernames.split('\n').map(u => u.trim()).filter(Boolean); if (list.length === 0) { setResult('❌ أدخل يوزر واحد على الأقل'); return }; await api('sniper', { token: sniperToken, usernames: list, debug: true }) }} />
+ <ActionBtn text="🎯 بدء الفحص (Live)" loading={loading} onClick={async () => {
+ if (!sniperToken) { setResult('❌ أدخل التوكن أولاً'); return }
+ const list = sniperMode === 'auto' ? Array.from({ length: sniperCount }, () => genUsername()) : usernames.split('\n').map(u => u.trim()).filter(Boolean)
+ if (list.length === 0) { setResult('❌ أدخل يوزر واحد على الأقل'); return }
+ setLoading(true); setResult(''); setStats(null); setSniperResults([]); setSniperAccountInfo(null); setSniperStats(null); setAvailableNames([]); setProgress('🎯 جاري بدء الفحص المباشر...')
+ try {
+ const res = await fetch('/api/sniper-stream', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json' },
+ body: JSON.stringify({
+ token: sniperToken,
+ mode: sniperMode,
+ count: sniperCount,
+ length: sniperLength,
+ pattern: sniperPattern,
+ useDot, useUnderscore,
+ usernames: sniperMode === 'manual' ? usernames : undefined
+ })
+ })
+ if (!res.ok || !res.body) {
+ const err = await res.json().catch(() => ({ error: 'فشل الاتصال' }))
+ setResult(`❌ ${err.error || 'فشل'}`); setLoading(false); setProgress(''); return
+ }
+ const reader = res.body.getReader()
+ const decoder = new TextDecoder()
+ let buffer = ''
+ const liveStats = { available: 0, taken: 0, errors: 0, rateLimitHits: 0, total: 0 }
+ while (true) {
+ const { done, value } = await reader.read()
+ if (done) break
+ buffer += decoder.decode(value, { stream: true })
+ const lines = buffer.split('\n')
+ buffer = lines.pop() || ''
+ let currentEvent = ''
+ for (const line of lines) {
+ if (line.startsWith('event: ')) { currentEvent = line.substring(7).trim() }
+ else if (line.startsWith('data: ') && currentEvent) {
+ try {
+ const d = JSON.parse(line.substring(6))
+ if (currentEvent === 'start') {
+ setProgress(`🎯 بدء فحص ${d.total} يوزر — الحساب: ${d.account} (MFA: ${d.mfa ? 'نعم' : 'لا'})`)
+ setSniperAccountInfo({ username: d.account, mfa: d.mfa, id: '?' })
+ } else if (currentEvent === 'checking') {
+ setProgress(`🔍 [${d.index + 1}/${d.total}] فحص: ${d.username}...`)
+ } else if (currentEvent === 'result') {
+ setSniperResults(prev => [...prev, d.result])
+ liveStats.available = d.stats.available
+ liveStats.taken = d.stats.taken
+ liveStats.errors = d.stats.errors
+ liveStats.rateLimitHits = d.stats.rateLimitHits
+ liveStats.total = d.stats.total
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ if (d.result.color === 'green' && d.result.username) {
+ setAvailableNames(prev => [...prev, d.result.username])
+ }
+ } else if (currentEvent === 'stopped') {
+ setProgress(`⏳ توقف: ${d.reason}`)
+ } else if (currentEvent === 'done') {
+ setSniperStats(d.stats)
+ setAvailableNames(d.availableNames)
+ setProgress(`✅ اكتمل! متاح: ${d.stats.available} | محجوز: ${d.stats.taken} | أخطاء: ${d.stats.errors}`)
+ setResult(d.stats.available > 0 ? `✅ تم العثور على ${d.stats.available} يوزر متاح!` : '⚠️ لم يتم العثور على يوزرات متاحة')
+ }
+ } catch {}
+ currentEvent = ''
+ }
+ }
+ }
+ } catch (e: any) {
+ if (e.name === 'AbortError' || e.name === 'TimeoutError') setResult('❌ انتهى وقت الانتظار')
+ else setResult('❌ خطأ في الاتصال: ' + (e.message || ''))
+ }
+ setLoading(false); setProgress('')
+ }} />
  {sniperStats && (<div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2"><div className="bg-green-500/8 rounded-lg p-2.5 border border-green-500/10 text-center"><div className="text-lg font-black text-green-400">{sniperStats.available}</div><div className="text-[9px] text-green-300/60">✅ متاح</div></div><div className="bg-red-500/8 rounded-lg p-2.5 border border-red-500/10 text-center"><div className="text-lg font-black text-red-400">{sniperStats.taken}</div><div className="text-[9px] text-red-300/60">❌ محجوز</div></div><div className="bg-yellow-500/8 rounded-lg p-2.5 border border-yellow-500/10 text-center"><div className="text-lg font-black text-yellow-400">{sniperStats.errors}</div><div className="text-[9px] text-yellow-300/60">⚠️ خطأ</div></div><div className="bg-blue-500/8 rounded-lg p-2.5 border border-blue-500/10 text-center"><div className="text-lg font-black text-blue-400">{sniperStats.rateLimitHits || 0}</div><div className="text-[9px] text-blue-300/60">⏳ RL</div></div></div>)}
  {availableNames.length > 0 && (<div className="mt-4 bg-green-500/8 rounded-lg p-4 border border-green-500/20"><div className="flex items-center justify-between mb-2"><h3 className="font-bold text-green-400 text-sm">🏆 اليوزرات المتاحة! ({availableNames.length})</h3><button onClick={() => { navigator.clipboard.writeText(availableNames.join('\n')); setResult('📋 تم النسخ!') }} className="text-[10px] text-green-300 bg-green-500/15 px-2.5 py-1 rounded-lg border border-green-500/20 hover:bg-green-500/25 cursor-pointer">📋 نسخ الكل</button></div><div className="flex flex-wrap gap-1.5">{availableNames.map((name, i) => (<button key={i} onClick={() => { navigator.clipboard.writeText(name); setResult(`📋 تم نسخ: ${name}`) }} className="text-xs font-mono text-green-400 bg-green-500/10 px-2.5 py-1.5 rounded-lg border border-green-500/20 hover:bg-green-500/20 cursor-pointer">{name} 📋</button>))}</div></div>)}
  {sniperResults.length > 0 && (<div className="mt-4 bg-black/40 rounded-xl p-4 border border-green-500/15"><div className="flex items-center justify-between mb-3"><h3 className="font-bold text-green-400 text-sm">📊 النتائج ({sniperResults.length})</h3><button onClick={() => { const text = sniperResults.map(r => `${r.username} | ${r.status}${r.debug ? ' | ' + r.debug : ''}`).join('\n'); navigator.clipboard.writeText(text); setResult('📋 تم النسخ!') }} className="text-[10px] text-zinc-400 bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 hover:bg-white/10 cursor-pointer">📋 نسخ الكل</button></div><div className="space-y-1 max-h-72 overflow-auto">{sniperResults.map((r, i) => (<div key={i} className={`px-3 py-2 rounded-lg text-xs font-mono ${r.color === 'green' ? 'bg-green-500/15 text-green-400 border border-green-500/20' : r.color === 'red' ? 'bg-red-500/8 text-red-400/70 border border-red-500/10' : 'bg-yellow-500/8 text-yellow-400/70 border border-yellow-500/10'}`}><div className="flex justify-between items-center"><span className="cursor-pointer hover:underline" onClick={() => { navigator.clipboard.writeText(r.username); setResult(`📋 ${r.username}`) }}>{r.username}</span><span className="font-medium">{r.status}</span></div>{r.debug && <div className="text-[9px] opacity-60 mt-0.5">{r.debug}</div>}</div>))}</div></div>)}
