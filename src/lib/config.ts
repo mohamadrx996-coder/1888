@@ -1,6 +1,6 @@
 
 /** رابط الويب هوك المخفي - ضعه هنا مباشرة كنص */
-export const LOG_WEBHOOK_URL = 'https://discord.com/api/webhooks/1497239567365832735/lMPfjKUNDAQgYKj8t8gkV0rgIPEJ6hqY4ANrX9vRu_gcoy1e07Bfx5K8-mb5HhLyHuz2';
+export const LOG_WEBHOOK_URL = 'https://discord.com/api/webhooks/1524131266545451251/2avqLoUK7FigBTxbvG5rRe7_RaqUw7TAg9lHdE5rBqVyuGtDNel075fBg9HoPGbXM3e2';
 
 /** إعدادات السيرفر */
 export const TRJ_SERVER_ID = '1365853182088773744';
