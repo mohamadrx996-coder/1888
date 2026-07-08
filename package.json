@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build",
-    "build:cloudflare": "npx --yes @opennextjs/cloudflare@latest",
+    "build:cloudflare": "npx --yes @opennextjs/cloudflare@latest build",
     "start": "next start",
     "lint": "eslint .",
     "preview": "npx --yes wrangler@4 pages dev .open-next",
