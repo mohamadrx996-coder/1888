@@ -1639,9 +1639,9 @@ export default function Home() {
  setResult(`⏳ توقف بسبب Rate Limit — فحص ${liveStats.total} يوزر`)
  break
  }
- // تأخير قصير قبل اليوزر التالي (تجنب rate limit)
+ // تأخير قصير قبل اليوزر التالي (تجنب rate limit + Cloudflare)
  if (i < list.length - 1) {
- const delay = consecutiveRL > 0 ? 2000 : 600
+ const delay = consecutiveRL > 0 ? 3000 : 1200
  await new Promise(r => setTimeout(r, delay))
  }
  }
