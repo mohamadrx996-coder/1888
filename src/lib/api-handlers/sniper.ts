@@ -4,15 +4,14 @@ import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
 import { stringToBase64 } from '@/lib/edge-utils'
 
 /* ===== 1888 Sniper Check - Cloudflare Compatible =====
- * يستخدم PATCH /users/@me فقط (pomelo-attempt مقيد من Discord - code 40333)
+ * يستخدم PATCH /users/@me فقط (pomelo-attempt مقيد من Discord)
+ * - قراءة body بأمان (يدعم JSON و URL-encoded و form-data)
  * - بدون AbortSignal.timeout (يسبب قطع في Cloudflare)
- * - معالجة responses الفارغة (internal network error)
- * - يعمل بشكل موثوق على Cloudflare Workers
+ * - معالجة responses الفارغة
  */
 
 export const runtime = 'edge'
 
-// Headers مثل ديسكورد الأصلي
 const SUPER_PROPERTIES = stringToBase64(JSON.stringify({
   os: "Windows",
   browser: "Discord Client",
@@ -48,8 +47,6 @@ interface CheckResult {
   method?: string
 }
 
-// ===== فحص يوزر عبر PATCH /users/@me =====
-// password فارغ يمنع التغيير الفعلي لكن يخبرنا بحالة اليوزر
 async function checkUsername(token: string, username: string): Promise<CheckResult> {
   let res: Response
   try {
@@ -59,26 +56,21 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
       body: JSON.stringify({ username, password: '' }),
     })
   } catch {
-    // فشل الـ fetch (Cloudflare قطع الاتصال)
-    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'fetch failed (cloudflare)' }
+    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'fetch failed' }
   }
 
-  // response فارغ
   if (!res) {
     return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'empty response' }
   }
 
-  // Rate limit
   if (res.status === 429) {
     return { username, status: '⏳ Rate Limit', color: 'yellow', rateLimited: true, method: 'PATCH', debug: 'HTTP 429' }
   }
 
-  // توكن غير صالح
   if (res.status === 401) {
     return { username, status: '❌ توكن غير صالح', color: 'red', method: 'PATCH', debug: 'HTTP 401' }
   }
 
-  // اقرأ الـ response كـ text
   let text = ''
   try {
     text = await res.text()
@@ -86,12 +78,10 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
     return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'text() failed' }
   }
 
-  // response فارغ (Cloudflare قطع)
   if (!text || text.length === 0) {
     return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'empty body' }
   }
 
-  // parse JSON
   let data: any = null
   try {
     data = JSON.parse(text)
@@ -99,7 +89,6 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
     return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'PATCH', debug: `non-JSON: ${text.substring(0, 80)}` }
   }
 
-  // 200 = تم التغيير (متاح)
   if (res.ok && data) {
     return {
       username,
@@ -111,17 +100,14 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
     }
   }
 
-  // 400/422 — نقرأ الأخطاء
   if (data) {
     const code = data.code
     const message = data.message || ''
 
-    // 50033 = USERNAME_TAKEN
     if (code === 50033) {
       return { username, status: '❌ محجوز', color: 'red', taken: true, method: 'PATCH', debug: 'code=50033 USERNAME_TAKEN' }
     }
 
-    // أخطاء اليوزر
     const usernameErrors = data.errors?.username?._errors || []
     if (usernameErrors.length > 0) {
       const first = usernameErrors[0]
@@ -136,7 +122,6 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
       return { username, status: `⚠️ ${first.message || first.code}`, color: 'yellow', method: 'PATCH', debug: `username: ${first.code}` }
     }
 
-    // أخطاء الباسورد — يعني اليوزر متاح لكن يحتاج password للتغيير
     const passwordErrors = data.errors?.password?._errors || []
     if (passwordErrors.length > 0) {
       const first = passwordErrors[0]
@@ -148,12 +133,10 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
       return { username, status: '⚠️ يحتاج password', color: 'yellow', method: 'PATCH', debug: `password: ${first.code}` }
     }
 
-    // 50035 = INVALID_FORM_BODY
     if (code === 50035) {
       return { username, status: `⚠️ ${message || 'خطأ في الصيغة'}`, color: 'yellow', method: 'PATCH', debug: `code=50035 ${message}` }
     }
 
-    // أخطاء عامة
     const msgL = message.toLowerCase()
     if (msgL.includes('taken') || msgL.includes('already')) {
       return { username, status: '❌ محجوز', color: 'red', taken: true, method: 'PATCH', debug: `msg: ${message}` }
@@ -172,8 +155,26 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json().catch(() => ({}))
-    const { token, username } = body
+    // ===== قراءة body بأمان =====
+    let body: any = {}
+    try {
+      const text = await request.text()
+      if (text && text.length > 0) {
+        body = JSON.parse(text)
+      }
+    } catch {
+      // لو فشل parse، نحاول قراءة كـ form data
+      try {
+        const formData = await request.formData()
+        const token = formData.get('token') as string
+        const username = formData.get('username') as string
+        body = { token, username }
+      } catch {
+        body = {}
+      }
+    }
+
+    const { token, username } = body as { token?: string; username?: string }
 
     if (!token) {
       return NextResponse.json({ success: false, error: 'التوكن مطلوب' }, { status: 400 })
