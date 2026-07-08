@@ -1,9 +1,5 @@
-{
-  "build": {
-    "command": "npm run build:cloudflare",
-    "cwd": "."
-  },
-  "deploy": {
-    "command": "wrangler pages deploy .open-next"
-  }
-}
+import { defineCloudflareConfig } from "@opennextjs/cloudflare";
+
+export default defineCloudflareConfig({
+  // إعدادات إضافية يمكن إضافتها لاحقاً
+});
