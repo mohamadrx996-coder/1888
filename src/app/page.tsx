@@ -1593,10 +1593,11 @@ export default function Home() {
  method: 'POST',
  headers: { 'Content-Type': 'application/json' },
  body: JSON.stringify({ token: sniperToken, username }),
- signal: AbortSignal.timeout(15000)
  })
- const data = await res.json()
- if (data.success && data.result) {
+ const text = await res.text()
+ let data: any = null
+ try { data = text ? JSON.parse(text) : null } catch { data = null }
+ if (data && data.success && data.result) {
  setSniperResults(prev => [...prev, data.result])
  liveStats.total++
  if (data.result.color === 'green') {
@@ -1615,12 +1616,13 @@ export default function Home() {
  }
  setSniperStats({ ...liveStats, available: liveStats.available })
  } else {
- // خطأ في الطلب
+ // خطأ في الطلب أو response فارغ
  liveStats.errors++
  liveStats.total++
- setSniperResults(prev => [...prev, { username, status: '❌ ' + (data.error || 'فشل'), color: 'red', method: 'client', debug: data.error }])
+ const errMsg = data?.error || (text ? 'استجابة غير صالحة' : 'استجابة فارغة')
+ setSniperResults(prev => [...prev, { username, status: '❌ ' + errMsg, color: 'red', method: 'client', debug: data?.error || text?.substring(0, 80) || 'empty' }])
  setSniperStats({ ...liveStats, available: liveStats.available })
- if (data.rateLimited) {
+ if (data?.rateLimited) {
  consecutiveRL++
  liveStats.rateLimitHits++
  }
