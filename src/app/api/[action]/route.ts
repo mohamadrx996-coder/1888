@@ -9,7 +9,6 @@ import * as copyMessages from '@/lib/api-handlers/copy-messages'
 import * as spam from '@/lib/api-handlers/spam'
 import * as leveling from '@/lib/api-handlers/leveling'
 import * as sniper from '@/lib/api-handlers/sniper'
-import * as sniperStream from '@/lib/api-handlers/sniper-stream'
 import * as sniperCheck from '@/lib/api-handlers/sniper-check'
 import * as checker from '@/lib/api-handlers/token-checker'
 import * as multiSpam from '@/lib/api-handlers/multi-spam'
@@ -64,7 +63,6 @@ const handlerMap: Record<string, HandlerModule> = {
   'spam': spam,
   'leveling': leveling,
   'sniper': sniper,
-  'sniper-stream': sniperStream,
   'sniper-check': sniperCheck,
   'token-checker': checker,
   'multi-spam': multiSpam,
