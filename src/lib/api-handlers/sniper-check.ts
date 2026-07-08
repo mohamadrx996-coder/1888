@@ -3,11 +3,12 @@ import { cleanToken, DISCORD_API } from '@/lib/discord'
 import { rateLimit, getClientIp, RATE_LIMITS } from '@/lib/rate-limit'
 import { stringToBase64 } from '@/lib/edge-utils'
 
-/* ===== 1888 Sniper Check - Cloudflare Compatible =====
- * يستخدم PATCH /users/@me فقط (pomelo-attempt مقيد من Discord)
- * - قراءة body بأمان (يدعم JSON و URL-encoded و form-data)
- * - بدون AbortSignal.timeout (يسبب قطع في Cloudflare)
- * - معالجة responses الفارغة
+/* ===== 1888 Sniper Check - Smart Cloudflare Compatible =====
+ * ذكي: يميز بين اليوزرات المتاحة فعلاً والمحجوزة
+ * - PATCH /users/@me مع username + password فارغ
+ * - لو PASSWORD_REQUIRED فقط (بدون username errors) → يحتاج password لكن قد يكون متاح أو محجوز
+ *   → نتحقق بـ GET /users/{username}/profile (آمن، لا يغير شيئاً)
+ * - 200 = موجود = محجوز، 404 = غير موجود = متاح فعلاً
  */
 
 export const runtime = 'edge'
@@ -24,10 +25,9 @@ const SUPER_PROPERTIES = stringToBase64(JSON.stringify({
   client_event_source: null,
 }))
 
-function dHeaders(token: string): Record<string, string> {
-  return {
+function dHeaders(token: string, noContentType = false): Record<string, string> {
+  const headers: Record<string, string> = {
     'Authorization': token,
-    'Content-Type': 'application/json',
     'Accept': 'application/json',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'X-Super-Properties': SUPER_PROPERTIES,
@@ -35,6 +35,10 @@ function dHeaders(token: string): Record<string, string> {
     'Origin': 'https://discord.com',
     'Referer': 'https://discord.com/channels/@me',
   }
+  if (!noContentType) {
+    headers['Content-Type'] = 'application/json'
+  }
+  return headers
 }
 
 interface CheckResult {
@@ -47,7 +51,8 @@ interface CheckResult {
   method?: string
 }
 
-async function checkUsername(token: string, username: string): Promise<CheckResult> {
+// ===== الطريقة 1: PATCH /users/@me =====
+async function checkPatchUser(token: string, username: string): Promise<CheckResult | null> {
   let res: Response
   try {
     res = await fetch(`${DISCORD_API}/users/@me`, {
@@ -56,17 +61,14 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
       body: JSON.stringify({ username, password: '' }),
     })
   } catch {
-    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'fetch failed' }
+    return null
   }
 
-  if (!res) {
-    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'empty response' }
-  }
+  if (!res) return null
 
   if (res.status === 429) {
     return { username, status: '⏳ Rate Limit', color: 'yellow', rateLimited: true, method: 'PATCH', debug: 'HTTP 429' }
   }
-
   if (res.status === 401) {
     return { username, status: '❌ توكن غير صالح', color: 'red', method: 'PATCH', debug: 'HTTP 401' }
   }
@@ -75,20 +77,19 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
   try {
     text = await res.text()
   } catch {
-    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'text() failed' }
+    return null
   }
 
-  if (!text || text.length === 0) {
-    return { username, status: '⚠️ internal network error', color: 'yellow', method: 'PATCH', debug: 'empty body' }
-  }
+  if (!text) return null
 
   let data: any = null
   try {
     data = JSON.parse(text)
   } catch {
-    return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'PATCH', debug: `non-JSON: ${text.substring(0, 80)}` }
+    return null
   }
 
+  // 200 = تم التغيير (متاح فعلاً)
   if (res.ok && data) {
     return {
       username,
@@ -100,14 +101,17 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
     }
   }
 
+  // 400/422 — نقرأ الأخطاء
   if (data) {
     const code = data.code
     const message = data.message || ''
 
+    // 50033 = USERNAME_TAKEN (محجوز بشكل قاطع)
     if (code === 50033) {
       return { username, status: '❌ محجوز', color: 'red', taken: true, method: 'PATCH', debug: 'code=50033 USERNAME_TAKEN' }
     }
 
+    // أخطاء اليوزر (TAKEN, INVALID, إلخ)
     const usernameErrors = data.errors?.username?._errors || []
     if (usernameErrors.length > 0) {
       const first = usernameErrors[0]
@@ -122,17 +126,16 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
       return { username, status: `⚠️ ${first.message || first.code}`, color: 'yellow', method: 'PATCH', debug: `username: ${first.code}` }
     }
 
+    // أخطاء الباسورد فقط (بدون username errors)
+    // هذا يعني: اليوزر صالح لكن يحتاج password للتغيير
+    // لكن لا نعرف لو محجوز أو متاح → نحتاج طريقة أخرى للتأكد
     const passwordErrors = data.errors?.password?._errors || []
-    if (passwordErrors.length > 0) {
-      const first = passwordErrors[0]
-      const ec = (first.code || '').toUpperCase()
-      const em = (first.message || '').toLowerCase()
-      if (ec.includes('REQUIRED') || em.includes('required') || em.includes('password')) {
-        return { username, status: '✅ متاح!', color: 'green', taken: false, method: 'PATCH', debug: 'password required → available' }
-      }
-      return { username, status: '⚠️ يحتاج password', color: 'yellow', method: 'PATCH', debug: `password: ${first.code}` }
+    if (passwordErrors.length > 0 && usernameErrors.length === 0) {
+      // نرجع null للانتقال للطريقة 2 (GET /users/{username}/profile)
+      return null
     }
 
+    // 50035 = INVALID_FORM_BODY
     if (code === 50035) {
       return { username, status: `⚠️ ${message || 'خطأ في الصيغة'}`, color: 'yellow', method: 'PATCH', debug: `code=50035 ${message}` }
     }
@@ -144,7 +147,76 @@ async function checkUsername(token: string, username: string): Promise<CheckResu
     return { username, status: `⚠️ ${message || 'خطأ ' + res.status}`, color: 'yellow', method: 'PATCH', debug: `HTTP ${res.status} code=${code}` }
   }
 
-  return { username, status: `❓ HTTP ${res.status}`, color: 'yellow', method: 'PATCH', debug: `HTTP ${res.status} body=${text.substring(0, 80)}` }
+  return null
+}
+
+// ===== الطريقة 2: GET /users/{username}/profile =====
+// آمن — لا يغير شيئاً
+// 200 = الحساب موجود = محجوز
+// 404 = الحساب غير موجود = متاح
+async function checkUserProfile(token: string, username: string): Promise<CheckResult | null> {
+  let res: Response
+  try {
+    res = await fetch(`${DISCORD_API}/users/${username}/profile`, {
+      headers: dHeaders(token, true),
+    })
+  } catch {
+    return null
+  }
+
+  if (!res) return null
+
+  if (res.status === 429) {
+    return { username, status: '⏳ Rate Limit', color: 'yellow', rateLimited: true, method: 'profile', debug: 'HTTP 429' }
+  }
+  if (res.status === 401) {
+    return { username, status: '❌ توكن غير صالح', color: 'red', method: 'profile', debug: 'HTTP 401' }
+  }
+
+  // 200 = الحساب موجود = اليوزر محجوز
+  if (res.ok) {
+    let data: any = null
+    try {
+      const text = await res.text()
+      if (text) data = JSON.parse(text)
+    } catch {}
+    return {
+      username,
+      status: '❌ محجوز',
+      color: 'red',
+      taken: true,
+      method: 'profile',
+      debug: `HTTP 200 id=${data?.id || '?'}`,
+    }
+  }
+
+  // 404 = الحساب غير موجود = اليوزر متاح فعلاً
+  if (res.status === 404) {
+    return {
+      username,
+      status: '✅ متاح!',
+      color: 'green',
+      taken: false,
+      method: 'profile',
+      debug: 'HTTP 404 — account not found',
+    }
+  }
+
+  return null
+}
+
+// ===== فحص شامل ذكي =====
+async function checkUsername(token: string, username: string): Promise<CheckResult> {
+  // الطريقة 1: PATCH /users/@me
+  const r1 = await checkPatchUser(token, username)
+  if (r1) return r1
+
+  // الطريقة 2: GET /users/{username}/profile (للتأكد لو محجوز أو متاح)
+  const r2 = await checkUserProfile(token, username)
+  if (r2) return r2
+
+  // فشلت كل الطرق
+  return { username, status: '⚠️ internal network error', color: 'yellow', method: 'all', debug: 'all methods failed' }
 }
 
 export async function POST(request: NextRequest) {
@@ -155,7 +227,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    // ===== قراءة body بأمان =====
+    // قراءة body بأمان
     let body: any = {}
     try {
       const text = await request.text()
@@ -163,15 +235,13 @@ export async function POST(request: NextRequest) {
         body = JSON.parse(text)
       }
     } catch {
-      // لو فشل parse، نحاول قراءة كـ form data
       try {
         const formData = await request.formData()
-        const token = formData.get('token') as string
-        const username = formData.get('username') as string
-        body = { token, username }
-      } catch {
-        body = {}
-      }
+        body = {
+          token: formData.get('token'),
+          username: formData.get('username')
+        }
+      } catch { body = {} }
     }
 
     const { token, username } = body as { token?: string; username?: string }
