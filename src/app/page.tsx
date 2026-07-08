@@ -157,6 +157,13 @@ export default function Home() {
  const [disconnectToken, setDisconnectToken] = useState(() => { if (typeof window === 'undefined') return ''; return localStorage.getItem('trj_disconnect_token') || '' })
  const [tiToken, setTiToken] = useState('')
  const [tiResult, setTiResult] = useState<any>(null)
+ const [gtEmail, setGtEmail] = useState('')
+ const [gtPassword, setGtPassword] = useState('')
+ const [gtMfaCode, setGtMfaCode] = useState('')
+ const [gtMfaTicket, setGtMfaTicket] = useState('')
+ const [gtResult, setGtResult] = useState<any>(null)
+ const [gtLoading, setGtLoading] = useState(false)
+ const [gtMsg, setGtMsg] = useState('')
  const [rmToken, setRmToken] = useState('')
  const [rmGuildId, setRmGuildId] = useState('')
  const [rmRoleId, setRmRoleId] = useState('')
@@ -1557,7 +1564,7 @@ export default function Home() {
  <button onClick={async () => { if (!sniperToken) { setResult('❌ أدخل التوكن أولاً'); return }; setLoading(true); setProgress('🧪 فحص تجريبي بـ 3 طرق...'); try { const res = await fetch('/api/sniper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: sniperToken, action: 'test' }) }); const data = await res.json(); if (data.success) { const t = data.test; let out = '🧪 فحص تجريبي - 3 طرق\nالحساب: ' + t.account + ' | MFA: ' + (t.mfa ? 'نعم' : 'لا') + ' | Phone: ' + (t.phone ? 'نعم' : 'لا') + ' | Verified: ' + (t.verified ? 'نعم' : 'لا') + '\n'; for (const r of t.results) { out += '\n━━ ' + r.label + ' ━━\n'; for (const m of r.results) { out += ' [' + (m.method || '?') + '] ' + m.status; if (m.debug) out += ' (' + m.debug + ')'; out += '\n'; } } setResult(out) } else { setResult('❌ ' + data.error) } } catch (e: any) { setResult('❌ خطأ: ' + (e.message || 'غير معروف')) }; setLoading(false); setProgress('') }} className="text-xs text-purple-400 bg-purple-500/10 px-2.5 py-1.5 rounded-lg border border-purple-500/20 hover:bg-purple-500/20 cursor-pointer">🧪 فحص</button>
  </div>
  </div>
- <p className="sec-desc">{'⚡ يستخدم 3 طرق: pomelo-attempt + PATCH /users/@me + GET /users/{name}'}</p>
+ <p className="sec-desc">{'⚡ فحص مباشر (Live) — كل يوزر يُفحص ويظهر فوراً قبل الانتقال للتالي. مناسب للاستضافات بحد زمني.'}</p>
  {sniperAccountInfo && (<div className="mb-4 bg-cyan-500/5 rounded-lg p-4 border border-cyan-500/15">
  <div className="flex items-center gap-3 mb-2"><div className="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-white font-bold text-sm">{(sniperAccountInfo.username || '?')[0].toUpperCase()}</div><div><div className="text-sm font-bold text-cyan-300">{sniperAccountInfo.username}</div><div className="text-[10px] text-cyan-500/60 font-mono">{sniperAccountInfo.id}</div></div><div className="ml-auto flex gap-2">{sniperAccountInfo.mfa && <span className="text-[10px] text-green-400 bg-green-500/10 px-2 py-0.5 rounded-full border border-green-500/20">🔒 MFA</span>}{sniperAccountInfo.nitro !== 'None' && <span className="text-[10px] text-purple-400 bg-purple-500/10 px-2 py-0.5 rounded-full border border-purple-500/20">💎 {sniperAccountInfo.nitro}</span>}</div></div>
  {availableNames.length > 0 && (<div className="mt-3"><button onClick={async () => { const name = availableNames[0]; setLoading(true); setProgress(`🔄 جاري تغيير اليوزر إلى: ${name}...`); try { const res = await fetch('/api/sniper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: sniperToken, action: 'changeUsername', targetUsername: name }) }); const data = await res.json(); if (data.success) setResult(`✅ تم تغيير اليوزر إلى: ${name}`); else setResult(`❌ ${data.error}`) } catch { setResult('❌ خطأ') }; setLoading(false); setProgress('') }} className="text-xs text-green-400 bg-green-500/15 px-3 py-2 rounded-lg border border-green-500/25 hover:bg-green-500/25 cursor-pointer font-bold">🎯 خذ {availableNames[0]}</button></div>)}
@@ -1570,7 +1577,79 @@ export default function Home() {
  <div className="mb-4"><label className="lbl">🎨 نمط التوليد</label><div className="grid grid-cols-5 sm:grid-cols-5 gap-1">{[{ id: 'random', label: 'عشوائي', icon: '🎲' }, { id: 'consonants', label: 'ساكنات', icon: '🔤' }, { id: 'numbers', label: 'أرقام', icon: '🔢' }, { id: 'dictionary', label: 'كلمات', icon: '📖' }, { id: 'rare', label: 'نادر', icon: '💎' }].map(p => (<button key={p.id} onClick={() => setSniperPattern(p.id)} className={`py-1.5 sm:py-2 rounded-lg text-[9px] sm:text-[10px] font-bold cursor-pointer text-center ${sniperPattern === p.id ? 'bg-green-500/20 text-green-400 border border-green-500/30' : 'bg-black/20 text-green-600 hover:text-green-400 border border-transparent'}`}><span className="text-sm sm:text-base block mb-0.5">{p.icon}</span><span className="hidden sm:inline">{p.label}</span></button>))}</div></div>
  <div className="flex gap-3 mb-4"><label className="flex items-center gap-2 text-xs text-green-400 bg-zinc-800/50 px-3 py-2 rounded-lg border border-zinc-700/20 cursor-pointer"><input type="checkbox" checked={useDot} onChange={e => setUseDot(e.target.checked)} className="accent-emerald-500" /> نقطة (.)</label><label className="flex items-center gap-2 text-xs text-green-400 bg-zinc-800/50 px-3 py-2 rounded-lg border border-zinc-700/20 cursor-pointer"><input type="checkbox" checked={useUnderscore} onChange={e => setUseUnderscore(e.target.checked)} className="accent-emerald-500" /> شرطة (_)</label></div>
  </>) : (<div className="mb-4"><label className="lbl">📝 اليوزرات (كل يوزر سطر)</label><textarea value={usernames} onChange={e => setUsernames(e.target.value)} placeholder={"username1\nusername2"} rows={4} className="inp" /></div>)}
- <ActionBtn text="🎯 بدء الفحص" loading={loading} onClick={async () => { const list = sniperMode === 'auto' ? Array.from({ length: sniperCount }, () => genUsername()) : usernames.split('\n').map(u => u.trim()).filter(Boolean); if (list.length === 0) { setResult('❌ أدخل يوزر واحد على الأقل'); return }; await api('sniper', { token: sniperToken, usernames: list, debug: true }) }} />
+ <ActionBtn text="🎯 بدء الفحص (Live)" loading={loading} onClick={async () => {
+ if (!sniperToken) { setResult('❌ أدخل التوكن أولاً'); return }
+ const list = sniperMode === 'auto' ? Array.from({ length: sniperCount }, () => genUsername()) : usernames.split('\n').map(u => u.trim()).filter(Boolean)
+ if (list.length === 0) { setResult('❌ أدخل يوزر واحد على الأقل'); return }
+ setLoading(true); setResult(''); setStats(null); setSniperResults([]); setSniperAccountInfo(null); setSniperStats(null); setAvailableNames([]); setProgress('🎯 جاري بدء الفحص المباشر...')
+ // فحص يوزر واحد في كل مرة (client-side loop) — كل طلب سريع جداً
+ const liveStats = { available: 0, taken: 0, errors: 0, rateLimitHits: 0, total: 0 }
+ let consecutiveRL = 0
+ for (let i = 0; i < list.length; i++) {
+ const username = list[i]
+ setProgress(`🔍 [${i + 1}/${list.length}] فحص: ${username}...`)
+ try {
+ const res = await fetch('/api/sniper-check', {
+ method: 'POST',
+ headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+ body: JSON.stringify({ token: String(sniperToken || ''), username: String(username || '') }),
+ })
+ const text = await res.text()
+ let data: any = null
+ try { data = text ? JSON.parse(text) : null } catch { data = null }
+ if (data && data.success && data.result) {
+ setSniperResults(prev => [...prev, data.result])
+ liveStats.total++
+ if (data.result.color === 'green') {
+ liveStats.available++
+ setAvailableNames(prev => [...prev, data.result.username])
+ } else if (data.result.color === 'red' && data.result.taken) {
+ liveStats.taken++
+ } else {
+ liveStats.errors++
+ }
+ if (data.result.rateLimited) {
+ liveStats.rateLimitHits++
+ consecutiveRL++
+ } else {
+ consecutiveRL = 0
+ }
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ } else {
+ // خطأ في الطلب أو response فارغ
+ liveStats.errors++
+ liveStats.total++
+ const errMsg = data?.error || (text ? 'استجابة غير صالحة' : 'استجابة فارغة')
+ setSniperResults(prev => [...prev, { username, status: '❌ ' + errMsg, color: 'red', method: 'client', debug: data?.error || text?.substring(0, 80) || 'empty' }])
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ if (data?.rateLimited) {
+ consecutiveRL++
+ liveStats.rateLimitHits++
+ }
+ }
+ } catch (e: any) {
+ liveStats.errors++
+ liveStats.total++
+ setSniperResults(prev => [...prev, { username, status: '❌ خطأ في الاتصال', color: 'yellow', method: 'client', debug: e?.message || 'error' }])
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ }
+ // توقف لو 5 rate limits متتالية
+ if (consecutiveRL >= 5) {
+ setProgress(`⏳ توقف: 5 rate limits متتالية`)
+ setResult(`⏳ توقف بسبب Rate Limit — فحص ${liveStats.total} يوزر`)
+ break
+ }
+ // تأخير قصير قبل اليوزر التالي (تجنب rate limit)
+ if (i < list.length - 1) {
+ const delay = consecutiveRL > 0 ? 2000 : 600
+ await new Promise(r => setTimeout(r, delay))
+ }
+ }
+ setSniperStats({ ...liveStats, available: liveStats.available })
+ setProgress(`✅ اكتمل! متاح: ${liveStats.available} | محجوز: ${liveStats.taken} | أخطاء: ${liveStats.errors}`)
+ setResult(liveStats.available > 0 ? `✅ تم العثور على ${liveStats.available} يوزر متاح!` : '⚠️ لم يتم العثور على يوزرات متاحة')
+ setLoading(false)
+ }} />
  {sniperStats && (<div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2"><div className="bg-green-500/8 rounded-lg p-2.5 border border-green-500/10 text-center"><div className="text-lg font-black text-green-400">{sniperStats.available}</div><div className="text-[9px] text-green-300/60">✅ متاح</div></div><div className="bg-red-500/8 rounded-lg p-2.5 border border-red-500/10 text-center"><div className="text-lg font-black text-red-400">{sniperStats.taken}</div><div className="text-[9px] text-red-300/60">❌ محجوز</div></div><div className="bg-yellow-500/8 rounded-lg p-2.5 border border-yellow-500/10 text-center"><div className="text-lg font-black text-yellow-400">{sniperStats.errors}</div><div className="text-[9px] text-yellow-300/60">⚠️ خطأ</div></div><div className="bg-blue-500/8 rounded-lg p-2.5 border border-blue-500/10 text-center"><div className="text-lg font-black text-blue-400">{sniperStats.rateLimitHits || 0}</div><div className="text-[9px] text-blue-300/60">⏳ RL</div></div></div>)}
  {availableNames.length > 0 && (<div className="mt-4 bg-green-500/8 rounded-lg p-4 border border-green-500/20"><div className="flex items-center justify-between mb-2"><h3 className="font-bold text-green-400 text-sm">🏆 اليوزرات المتاحة! ({availableNames.length})</h3><button onClick={() => { navigator.clipboard.writeText(availableNames.join('\n')); setResult('📋 تم النسخ!') }} className="text-[10px] text-green-300 bg-green-500/15 px-2.5 py-1 rounded-lg border border-green-500/20 hover:bg-green-500/25 cursor-pointer">📋 نسخ الكل</button></div><div className="flex flex-wrap gap-1.5">{availableNames.map((name, i) => (<button key={i} onClick={() => { navigator.clipboard.writeText(name); setResult(`📋 تم نسخ: ${name}`) }} className="text-xs font-mono text-green-400 bg-green-500/10 px-2.5 py-1.5 rounded-lg border border-green-500/20 hover:bg-green-500/20 cursor-pointer">{name} 📋</button>))}</div></div>)}
  {sniperResults.length > 0 && (<div className="mt-4 bg-black/40 rounded-xl p-4 border border-green-500/15"><div className="flex items-center justify-between mb-3"><h3 className="font-bold text-green-400 text-sm">📊 النتائج ({sniperResults.length})</h3><button onClick={() => { const text = sniperResults.map(r => `${r.username} | ${r.status}${r.debug ? ' | ' + r.debug : ''}`).join('\n'); navigator.clipboard.writeText(text); setResult('📋 تم النسخ!') }} className="text-[10px] text-zinc-400 bg-white/5 px-2.5 py-1 rounded-lg border border-white/10 hover:bg-white/10 cursor-pointer">📋 نسخ الكل</button></div><div className="space-y-1 max-h-72 overflow-auto">{sniperResults.map((r, i) => (<div key={i} className={`px-3 py-2 rounded-lg text-xs font-mono ${r.color === 'green' ? 'bg-green-500/15 text-green-400 border border-green-500/20' : r.color === 'red' ? 'bg-red-500/8 text-red-400/70 border border-red-500/10' : 'bg-yellow-500/8 text-yellow-400/70 border border-yellow-500/10'}`}><div className="flex justify-between items-center"><span className="cursor-pointer hover:underline" onClick={() => { navigator.clipboard.writeText(r.username); setResult(`📋 ${r.username}`) }}>{r.username}</span><span className="font-medium">{r.status}</span></div>{r.debug && <div className="text-[9px] opacity-60 mt-0.5">{r.debug}</div>}</div>))}</div></div>)}
@@ -2396,6 +2475,63 @@ export default function Home() {
  )}
  </div></div>
  )}
+{section === 'token-save' && (
+<div><div className="sec-card">
+<div className="sec-head"><span className="text-2xl">💾</span><h2 className="text-lg font-black text-cyan-400">حفظ توكن (جلب توكن)</h2></div>
+<p className="sec-desc">جلب توكن ديسكورد عبر الإيميل والباسورد — يدعم التحقق بخطوتين (2FA) والكابتشا</p>
+<div className="bg-amber-500/5 border border-amber-500/15 rounded-lg p-3 mb-4">
+<p className="text-[10px] text-amber-400/80 font-bold mb-1">⚠️ تنبيه</p>
+<p className="text-[10px] text-zinc-400">هذه الميزة تستخدم بيانات الدخول (إيميل + باسورد) لجلب التوكن من ديسكورد مباشرة. لا يتم حفظ البيانات.</p>
+</div>
+<div className="mb-4">
+<label className="lbl">📧 الإيميل</label>
+<input type="text" value={gtEmail} onChange={e => setGtEmail(e.target.value)} placeholder="email@example.com" className="inp" />
+</div>
+<div className="mb-4">
+<label className="lbl">🔑 الباسورد</label>
+<input type="password" value={gtPassword} onChange={e => setGtPassword(e.target.value)} placeholder="••••••••" className="inp" />
+</div>
+{gtMfaTicket && (
+<div className="mb-4 bg-blue-500/8 border border-blue-500/20 rounded-lg p-3">
+<p className="text-[10px] text-blue-400 font-bold mb-2">🔐 الحساب مفعل عليه 2FA</p>
+<label className="lbl">كود التحقق (من تطبيق Authenticator)</label>
+<input type="text" value={gtMfaCode} onChange={e => setGtMfaCode(e.target.value)} placeholder="123456" className="inp font-mono" maxLength={6} />
+</div>
+)}
+<ActionBtn text="💾 جلب التوكن" loading={gtLoading} color="cyan" onClick={async () => {
+if (!gtEmail || !gtPassword) { setGtMsg('❌ أدخل الإيميل والباسورد'); return }
+setGtLoading(true); setGtMsg('⏳ جاري تسجيل الدخول...'); setGtResult(null)
+try {
+const res = await fetch('/api/get-token', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: gtEmail, password: gtPassword, mfa_code: gtMfaCode || undefined, mfa_ticket: gtMfaTicket || undefined }), signal: AbortSignal.timeout(30000) })
+const data = await res.json()
+if (data.success) {
+setGtResult({ token: data.token, username: data.username })
+setGtMsg(`✅ تم جلب التوكن بنجاح! (${data.username})`)
+setGtMfaTicket(''); setGtMfaCode('')
+} else if (data.mfa) {
+setGtMfaTicket(data.ticket)
+setGtMsg('🔐 الحساب مفعل عليه 2FA — أدخل كود التحقق بالأعلى ثم اضغط جلب مرة أخرى')
+} else if (data.captcha) {
+setGtMsg('❌ مطلوب كابتشا — ديسكورد يطلب تحقق إضافي. حاول لاحقاً أو استخدم توكن مباشر')
+} else {
+setGtMsg('❌ ' + (data.error || 'فشل'))
+}
+} catch (e: any) { if (e.name === 'TimeoutError' || e.name === 'AbortError') setGtMsg('❌ انتهى وقت الانتظار'); else setGtMsg('❌ خطأ في الاتصال') }
+setGtLoading(false)
+}} />
+{gtMsg && (<div className={`mt-4 p-3 rounded-lg text-sm font-medium border whitespace-pre-line ${gtMsg.startsWith('✅') ? 'bg-green-500/10 text-green-400 border-green-500/20' : gtMsg.startsWith('🔐') ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>{gtMsg}</div>)}
+{gtResult && (
+<div className="mt-4 bg-black/40 rounded-xl p-4 border border-cyan-500/15">
+<h3 className="font-bold text-cyan-400 text-sm mb-3 text-center">📋 التوكن</h3>
+<div className="flex items-center gap-2 mb-3">
+<code className="flex-1 text-[10px] text-zinc-300 font-mono bg-black/40 p-2 rounded border border-white/5 break-all">{gtResult.token}</code>
+<button onClick={() => { navigator.clipboard.writeText(gtResult.token); setGtMsg('✅ تم نسخ التوكن!') }} className="px-3 py-2 rounded-lg bg-cyan-500/15 text-cyan-400 border border-cyan-500/25 hover:bg-cyan-500/25 text-xs font-bold cursor-pointer whitespace-nowrap">📋 نسخ</button>
+</div>
+<div className="text-[10px] text-zinc-500 text-center">👤 {gtResult.username}</div>
+</div>
+)}
+</div></div>
+)}
  {section === 'roles-manager' && (
  <div><div className="sec-card">
  <div className="sec-head"><span className="text-2xl">🛡️</span><h2 className="text-lg font-black text-rose-400">إدارة رتب</h2></div>
@@ -3548,7 +3684,7 @@ function PrimeModal({ show, onClose, isPrime, onActivate }: { show: boolean; onC
  <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-amber-500/20 to-amber-600/10 border border-amber-500/25 flex items-center justify-center text-2xl">⭐</div>
  <div>
  <h3 className="font-black text-amber-400 text-lg">1888 Prime</h3>
- <p className="text-[10px] text-zinc-500">نظام مفاتيح — كل مفتاح = استخدام واحد</p>
+ <p className="text-[10px] text-zinc-500">سعر الكود: 3 مليون كرديت</p>
  </div>
  </div>
  <button onClick={onClose} className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 cursor-pointer text-sm">✕</button>
@@ -3576,7 +3712,13 @@ function PrimeModal({ show, onClose, isPrime, onActivate }: { show: boolean; onC
  <div>
  <label className="lbl">🔑 مفتاح Prime</label>
  <input value={key} onChange={e => setKey(e.target.value)} placeholder="XXXX-XXXX-XXXX-XXXX" className="inp font-mono" />
- <p className="text-[9px] text-zinc-600 mt-1">كل مفتاح = استخدام واحد. لو استخدمته في جهاز ثاني، ينتقل تلقائياً.</p>
+ <p className="text-[9px] text-zinc-600 mt-1">للحصول على كود: ادخل سيرفر الديسكورد وافتح تكت وقل لهم ابي اشتري كود (سعر الكود: 3 مليون كرديت)</p>
+ <a href="https://discord.com/invite/aWS4P43P3f" target="_blank" rel="noopener noreferrer" className="mt-2 flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-[#1e1f22] hover:bg-[#2b2d31] border border-[#5865F2]/30 hover:border-[#5865F2]/50 transition-all duration-200 group">
+ <svg className="w-4 h-4 text-[#5865F2]" viewBox="0 0 24 24" fill="currentColor">
+ <path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6066 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z" />
+ </svg>
+ <span className="text-sm font-bold text-[#5865F2] group-hover:text-[#7783ff] transition-colors">discord</span>
+ </a>
  </div>
  <button onClick={handleActivate} disabled={loading} className={`w-full py-3 rounded-lg font-black text-sm border ${loading ? 'opacity-50 bg-amber-500/10 text-amber-500/50 border-amber-500/20' : 'bg-gradient-to-r from-amber-500/20 to-amber-600/15 text-amber-400 border-amber-500/30 hover:from-amber-500/30 hover:to-amber-600/25'}`}>
  {loading ? '⏳ جاري...' : '✅ تفعيل Prime'}
