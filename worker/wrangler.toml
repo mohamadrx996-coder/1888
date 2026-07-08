@@ -1,0 +1,22 @@
+# 1888 Token Guard Worker — Cloudflare Worker Config
+# النشر: wrangler deploy
+
+name = "1888-token-guard"
+main = "token-guard-cron.ts"
+compatibility_date = "2024-12-01"
+
+# ===== KV Storage للمراقبة 24/7 =====
+# أنشئ الـ namespace أولاً:
+#   wrangler kv:namespace create TOKEN_GUARD_KV
+# ثم انسخ الـ id الناتج وضعه هنا:
+[[kv_namespaces]]
+binding = "TOKEN_GUARD_KV"
+id = "YOUR_KV_NAMESPACE_ID_HERE"
+
+# ===== Cron Trigger — كل دقيقة (شبه فوري) =====
+[triggers]
+crons = ["* * * * *"]
+
+# ===== متغيرات بيئة اختيارية =====
+# [vars]
+# ALLOWED_ORIGIN = "https://your-1888-site.pages.dev"

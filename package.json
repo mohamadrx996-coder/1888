@@ -1,0 +1,33 @@
+{
+  "name": "trojan-1888",
+  "version": "5.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "build": "next build",
+    "build:cloudflare": "npx --yes @opennextjs/cloudflare@latest",
+    "start": "next start",
+    "lint": "eslint .",
+    "preview": "npx --yes wrangler@3 pages dev .open-next",
+    "deploy": "npx --yes wrangler@3 pages deploy .open-next"
+  },
+  "dependencies": {
+    "next": "^16.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@opennextjs/cloudflare": "^1.0.0",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "bun-types": "^1.3.4",
+    "eslint": "^9",
+    "eslint-config-next": "^16.1.1",
+    "tailwindcss": "^4",
+    "tw-animate-css": "^1.3.5",
+    "typescript": "^5",
+    "wrangler": "^3.78.0"
+  }
+}
